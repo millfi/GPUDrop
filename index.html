@@ -1,26 +1,83 @@
 <!doctype html>
 <html lang="ja">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>FPS Estimator</title>
-    <style>
-      :root { color-scheme: dark; }
-      body { margin: 0; font-family: system-ui, -apple-system, sans-serif; background: #111; color: #ddd; }
-      h1 { font-size: 16px; margin: 0 0 8px; font-weight: 500; }
-      input, button { background: #2a2a2a; color: #ddd; border: 1px solid #444; padding: 4px 8px; font: inherit; }
-      button:disabled { opacity: .5; cursor: not-allowed; }
-      canvas { display: block; max-width: 100%; height: auto; background: #000; }
-      #root { padding: 12px; }
-      .controls { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 8px; }
-      .controls label { display: flex; gap: 6px; align-items: center; }
-      .stats { font-family: ui-monospace, monospace; font-size: 12px; margin-bottom: 8px; }
-      .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 8px; }
-      .events { max-height: 200px; overflow: auto; font-family: ui-monospace, monospace; font-size: 12px; border: 1px solid #333; padding: 4px; }
-    </style>
-  </head>
-  <body>
-    <div id="root"></div>
-    <script type="module" src="/src/main.tsx"></script>
-  </body>
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>FPS Estimator</title>
+        <style>
+            :root {
+                color-scheme: dark;
+            }
+            body {
+                margin: 0;
+                font-family:
+                    system-ui,
+                    -apple-system,
+                    sans-serif;
+                background: #111;
+                color: #ddd;
+            }
+            h1 {
+                font-size: 16px;
+                margin: 0 0 8px;
+                font-weight: 500;
+            }
+            input,
+            button {
+                background: #2a2a2a;
+                color: #ddd;
+                border: 1px solid #444;
+                padding: 4px 8px;
+                font: inherit;
+            }
+            button:disabled {
+                opacity: 0.5;
+                cursor: not-allowed;
+            }
+            canvas {
+                display: block;
+                max-width: 100%;
+                height: auto;
+                background: #000;
+            }
+            #root {
+                padding: 12px;
+            }
+            .controls {
+                display: flex;
+                gap: 12px;
+                align-items: center;
+                flex-wrap: wrap;
+                margin-bottom: 8px;
+            }
+            .controls label {
+                display: flex;
+                gap: 6px;
+                align-items: center;
+            }
+            .stats {
+                font-family: ui-monospace, monospace;
+                font-size: 12px;
+                margin-bottom: 8px;
+            }
+            .grid {
+                display: grid;
+                grid-template-columns: 1fr 1fr;
+                gap: 8px;
+                margin-bottom: 8px;
+            }
+            .events {
+                max-height: 200px;
+                overflow: auto;
+                font-family: ui-monospace, monospace;
+                font-size: 12px;
+                border: 1px solid #333;
+                padding: 4px;
+            }
+        </style>
+    </head>
+    <body>
+        <div id="root"></div>
+        <script type="module" src="/src/main.tsx"></script>
+    </body>
 </html>

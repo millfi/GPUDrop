@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from 'react';
-import { Player, type Stats, type DupEvent } from './player';
+import { useEffect, useRef, useState } from "react";
+import { Player, type Stats, type DupEvent } from "./player";
 
 const HISTORY_CAP = 600;
 const EVENTS_CAP = 100;
@@ -7,6 +7,7 @@ const EVENTS_CAP = 100;
 export default function App() {
   const [file, setFile] = useState<File | null>(null);
   const [threshold, setThreshold] = useState(0.05);
+  const [frameThreshold, setFrameThreshold] = useState(0);
   const [running, setRunning] = useState(false);
   const [stats, setStats] = useState<Stats | null>(null);
   const [events, setEvents] = useState<DupEvent[]>([]);
@@ -23,7 +24,13 @@ export default function App() {
   }, [threshold]);
 
   useEffect(() => {
-    return () => { playerRef.current?.stop(); };
+    playerRef.current?.setFrameThreshold(frameThreshold);
+  }, [frameThreshold]);
+
+  useEffect(() => {
+    return () => {
+      playerRef.current?.stop();
+    };
   }, []);
 
   const start = async () => {
@@ -38,13 +45,26 @@ export default function App() {
       videoCanvas: videoCanvas.current!,
       diffCanvas: diffCanvas.current!,
       threshold,
+      frameThreshold,
       onStats: (s) => {
         setStats(s);
         const h = historyRef.current;
         h.push({ fps: s.fps, ft: s.frameTime * 1000 });
         if (h.length > HISTORY_CAP) h.shift();
-        drawChart(fpsCanvas.current, h.map((x) => x.fps), 0, 144, '#0f0');
-        drawChart(ftCanvas.current, h.map((x) => x.ft), 0, 100, '#0cf');
+        drawChart(
+          fpsCanvas.current,
+          h.map((x) => x.fps),
+          0,
+          144,
+          "#0f0",
+        );
+        drawChart(
+          ftCanvas.current,
+          h.map((x) => x.ft),
+          0,
+          100,
+          "#0cf",
+        );
       },
       onDuplicate: (e) => {
         setEvents((prev) => {
@@ -76,7 +96,7 @@ export default function App() {
           onChange={(e) => setFile(e.target.files?.[0] ?? null)}
         />
         <label>
-          閾値: {threshold.toFixed(3)}
+          ピクセル閾値: {threshold.toFixed(3)}
           <input
             type="range"
             min={0}
@@ -86,14 +106,27 @@ export default function App() {
             onChange={(e) => setThreshold(parseFloat(e.target.value))}
           />
         </label>
-        <button onClick={start} disabled={!file || running}>開始</button>
+        <label>
+          フレーム閾値: {(frameThreshold * 100).toFixed(3)}%
+          <input
+            type="range"
+            min={0}
+            max={0.1}
+            step={0.0001}
+            value={frameThreshold}
+            onChange={(e) => setFrameThreshold(parseFloat(e.target.value))}
+          />
+        </label>
+        <button onClick={start} disabled={!file || running}>
+          開始
+        </button>
         {running && <span>再生中…</span>}
       </div>
 
       <div className="stats">
         {stats
           ? `t=${stats.timestamp.toFixed(3)}s  frame#${stats.frameNumber}  fps=${stats.fps}  frameTime=${(stats.frameTime * 1000).toFixed(2)}ms`
-          : '—'}
+          : "—"}
       </div>
 
       <div className="grid">
@@ -119,7 +152,9 @@ export default function App() {
         <div>同一フレーム検知 ({events.length}件)</div>
         <div className="events">
           {events.map((e, i) => (
-            <div key={i}>t = {e.timestamp.toFixed(3)}s · frame #{e.frameNumber}</div>
+            <div key={i}>
+              t = {e.timestamp.toFixed(3)}s · frame #{e.frameNumber}
+            </div>
           ))}
         </div>
       </div>
@@ -135,14 +170,14 @@ function drawChart(
   color: string,
 ) {
   if (!canvas) return;
-  const ctx = canvas.getContext('2d');
+  const ctx = canvas.getContext("2d");
   if (!ctx) return;
   const w = canvas.width;
   const h = canvas.height;
   ctx.clearRect(0, 0, w, h);
 
   // gridlines at 1/4 increments
-  ctx.strokeStyle = '#333';
+  ctx.strokeStyle = "#333";
   ctx.lineWidth = 1;
   for (let i = 1; i < 4; i++) {
     const y = (i * h) / 4;

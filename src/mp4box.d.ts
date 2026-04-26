@@ -1,5 +1,7 @@
-declare module 'mp4box' {
-  export interface MP4ArrayBuffer extends ArrayBuffer { fileStart: number; }
+declare module "mp4box" {
+  export interface MP4ArrayBuffer extends ArrayBuffer {
+    fileStart: number;
+  }
 
   export interface MP4VideoTrack {
     id: number;
@@ -26,12 +28,18 @@ declare module 'mp4box' {
   export interface MP4File {
     onReady: ((info: MP4Info) => void) | null;
     onError: ((e: unknown) => void) | null;
-    onSamples: ((id: number, user: unknown, samples: MP4Sample[]) => void) | null;
+    onSamples:
+      | ((id: number, user: unknown, samples: MP4Sample[]) => void)
+      | null;
     appendBuffer(buffer: MP4ArrayBuffer): number;
     flush(): void;
     start(): void;
     stop(): void;
-    setExtractionOptions(id: number, user?: unknown, options?: { nbSamples?: number }): void;
+    setExtractionOptions(
+      id: number,
+      user?: unknown,
+      options?: { nbSamples?: number },
+    ): void;
     getTrackById(id: number): unknown;
   }
 

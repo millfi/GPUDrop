@@ -6,8 +6,12 @@
 // the previous-vs-current comparison stays consistent. Playback is paced
 // against wall-clock using each frame's timestamp.
 
-import MP4Box, { type MP4ArrayBuffer, type MP4File, type MP4Sample } from 'mp4box';
-import { Analyzer } from './analyzer';
+import MP4Box, {
+  type MP4ArrayBuffer,
+  type MP4File,
+  type MP4Sample,
+} from "mp4box";
+import { Analyzer } from "./analyzer";
 
 export interface Stats {
   fps: number;
@@ -25,7 +29,8 @@ interface Options {
   file: File;
   videoCanvas: HTMLCanvasElement;
   diffCanvas: HTMLCanvasElement;
-  threshold: number;
+  threshold: number; // per-pixel linearRGB distance threshold
+  frameThreshold: number; // ratio of differing pixels to total pixels above which the frame is considered "different"
   onStats: (s: Stats) => void;
   onDuplicate: (e: DupEvent) => void;
   onEnd?: () => void;
@@ -37,6 +42,8 @@ export class Player {
   private decoder: VideoDecoder | null = null;
   private mp4: MP4File | null = null;
   private threshold: number;
+  private frameThreshold: number;
+  private totalPixels = 0;
   private stopped = false;
   private trackId = 0;
 
@@ -57,16 +64,21 @@ export class Player {
   constructor(opts: Options) {
     this.opts = opts;
     this.threshold = opts.threshold;
+    this.frameThreshold = opts.frameThreshold;
   }
 
   setThreshold(t: number) {
     this.threshold = t;
   }
 
+  setFrameThreshold(t: number) {
+    this.frameThreshold = t;
+  }
+
   async start() {
     this.mp4 = MP4Box.createFile();
 
-    this.mp4.onError = (e) => console.error('[mp4box]', e);
+    this.mp4.onError = (e) => console.error("[mp4box]", e);
 
     this.mp4.onReady = (info) => {
       void this.handleReady(info);
@@ -80,18 +92,23 @@ export class Player {
     await this.streamFile();
   }
 
-  private async handleReady(info: { videoTracks: ReturnType<MP4File['getTrackById']> extends infer _ ? any : never }) {
+  private async handleReady(info: {
+    videoTracks: ReturnType<MP4File["getTrackById"]> extends infer _
+      ? any
+      : never;
+  }) {
     try {
       const track = (info as any).videoTracks[0];
-      if (!track) throw new Error('動画トラックがありません');
+      if (!track) throw new Error("動画トラックがありません");
       this.trackId = track.id;
 
       const w: number = track.video.width;
       const h: number = track.video.height;
+      this.totalPixels = w * h;
 
       this.opts.videoCanvas.width = w;
       this.opts.videoCanvas.height = h;
-      this.vctx = this.opts.videoCanvas.getContext('2d');
+      this.vctx = this.opts.videoCanvas.getContext("2d");
 
       this.analyzer = new Analyzer();
       await this.analyzer.init(w, h, this.opts.diffCanvas);
@@ -100,7 +117,7 @@ export class Player {
 
       this.decoder = new VideoDecoder({
         output: (f) => this.queueFrame(f),
-        error: (e) => console.error('[decoder]', e),
+        error: (e) => console.error("[decoder]", e),
       });
       this.decoder.configure({
         codec: track.codec,
@@ -125,7 +142,10 @@ export class Player {
       if (this.stopped) return;
       const { done, value } = await reader.read();
       if (done) break;
-      const ab = value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength) as MP4ArrayBuffer;
+      const ab = value.buffer.slice(
+        value.byteOffset,
+        value.byteOffset + value.byteLength,
+      ) as MP4ArrayBuffer;
       ab.fileStart = offset;
       this.mp4!.appendBuffer(ab);
       offset += value.byteLength;
@@ -143,7 +163,7 @@ export class Player {
       }
       this.decoder.decode(
         new EncodedVideoChunk({
-          type: s.is_sync ? 'key' : 'delta',
+          type: s.is_sync ? "key" : "delta",
           timestamp: (s.cts * 1_000_000) / s.timescale,
           duration: (s.duration * 1_000_000) / s.timescale,
           data: s.data,
@@ -153,14 +173,23 @@ export class Player {
   }
 
   private queueFrame(frame: VideoFrame) {
-    this.chain = this.chain.then(() => this.processFrame(frame)).catch((e) => {
-      console.error(e);
-      try { frame.close(); } catch { /* already closed */ }
-    });
+    this.chain = this.chain
+      .then(() => this.processFrame(frame))
+      .catch((e) => {
+        console.error(e);
+        try {
+          frame.close();
+        } catch {
+          /* already closed */
+        }
+      });
   }
 
   private async processFrame(frame: VideoFrame) {
-    if (this.stopped) { frame.close(); return; }
+    if (this.stopped) {
+      frame.close();
+      return;
+    }
 
     if (this.startWall === 0) {
       this.startWall = performance.now();
@@ -172,13 +201,17 @@ export class Player {
     const delay = target - performance.now();
     if (delay > 0) await new Promise((r) => setTimeout(r, delay));
 
-    if (this.stopped) { frame.close(); return; }
+    if (this.stopped) {
+      frame.close();
+      return;
+    }
 
     // 1. Display
     if (this.vctx) {
       this.vctx.drawImage(
         frame as unknown as CanvasImageSource,
-        0, 0,
+        0,
+        0,
         this.opts.videoCanvas.width,
         this.opts.videoCanvas.height,
       );
@@ -200,12 +233,18 @@ export class Player {
     if (isFirst) {
       this.prevUniqueT = tSec;
       this.uniqueTs.push(tSec);
-      this.opts.onStats({ fps: 0, frameTime: 0, timestamp: tSec, frameNumber: this.frameNumber });
+      this.opts.onStats({
+        fps: 0,
+        frameTime: 0,
+        timestamp: tSec,
+        frameNumber: this.frameNumber,
+      });
       return;
     }
 
-    if (diffCount === 0) {
-      // Identical to the previous frame.
+    const ratio = this.totalPixels > 0 ? diffCount / this.totalPixels : 0;
+    if (ratio <= this.frameThreshold) {
+      // Considered identical to the previous frame.
       this.opts.onDuplicate({ timestamp: tSec, frameNumber: this.frameNumber });
     } else {
       this.lastFt = tSec - this.prevUniqueT;
@@ -214,7 +253,8 @@ export class Player {
     }
 
     // Trim sliding window of unique frames to the last 1 second.
-    while (this.uniqueTs.length > 0 && tSec - this.uniqueTs[0] > 1) this.uniqueTs.shift();
+    while (this.uniqueTs.length > 0 && tSec - this.uniqueTs[0] > 1)
+      this.uniqueTs.shift();
 
     this.opts.onStats({
       fps: this.uniqueTs.length,
@@ -227,8 +267,16 @@ export class Player {
   stop() {
     if (this.stopped) return;
     this.stopped = true;
-    try { this.decoder?.close(); } catch { /* */ }
-    try { this.mp4?.stop(); } catch { /* */ }
+    try {
+      this.decoder?.close();
+    } catch {
+      /* */
+    }
+    try {
+      this.mp4?.stop();
+    } catch {
+      /* */
+    }
     this.analyzer?.destroy();
     this.opts.onEnd?.();
   }
@@ -239,12 +287,16 @@ function getCodecDescription(mp4: MP4File, trackId: number): Uint8Array {
   for (const entry of track.mdia.minf.stbl.stsd.entries) {
     const box = entry.avcC || entry.hvcC || entry.vpcC || entry.av1C;
     if (box) {
-      const ds = new MP4Box.DataStream(undefined, 0, MP4Box.DataStream.BIG_ENDIAN);
+      const ds = new MP4Box.DataStream(
+        undefined,
+        0,
+        MP4Box.DataStream.BIG_ENDIAN,
+      );
       box.write(ds);
       // Strip the 8-byte box header (size + type) — the spec wants the
       // configuration record's body only.
       return new Uint8Array(ds.buffer, 8);
     }
   }
-  throw new Error('コーデック設定が見つかりません');
+  throw new Error("コーデック設定が見つかりません");
 }

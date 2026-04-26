@@ -89,52 +89,79 @@ export class Analyzer {
   private hasPrev = false;
 
   async init(width: number, height: number, diffCanvas: HTMLCanvasElement) {
-    if (!navigator.gpu) throw new Error('このブラウザは WebGPU 非対応です');
+    if (!navigator.gpu) throw new Error("このブラウザは WebGPU 非対応です");
     const adapter = await navigator.gpu.requestAdapter();
-    if (!adapter) throw new Error('GPU アダプタを取得できません');
+    if (!adapter) throw new Error("GPU アダプタを取得できません");
     this.device = await adapter.requestDevice();
     this.w = width;
     this.h = height;
 
     const U = GPUTextureUsage;
     const texUsage = U.TEXTURE_BINDING | U.COPY_DST | U.RENDER_ATTACHMENT;
-    this.prevTex = this.device.createTexture({ size: [width, height], format: 'rgba8unorm', usage: texUsage });
-    this.currTex = this.device.createTexture({ size: [width, height], format: 'rgba8unorm', usage: texUsage });
+    this.prevTex = this.device.createTexture({
+      size: [width, height],
+      format: "rgba8unorm",
+      usage: texUsage,
+    });
+    this.currTex = this.device.createTexture({
+      size: [width, height],
+      format: "rgba8unorm",
+      usage: texUsage,
+    });
     this.diffTex = this.device.createTexture({
       size: [width, height],
-      format: 'rgba8unorm',
+      format: "rgba8unorm",
       usage: U.TEXTURE_BINDING | U.STORAGE_BINDING,
     });
 
     const B = GPUBufferUsage;
-    this.counterBuf = this.device.createBuffer({ size: 4, usage: B.STORAGE | B.COPY_SRC | B.COPY_DST });
-    this.readBuf = this.device.createBuffer({ size: 4, usage: B.MAP_READ | B.COPY_DST });
-    this.uniBuf = this.device.createBuffer({ size: 16, usage: B.UNIFORM | B.COPY_DST });
+    this.counterBuf = this.device.createBuffer({
+      size: 4,
+      usage: B.STORAGE | B.COPY_SRC | B.COPY_DST,
+    });
+    this.readBuf = this.device.createBuffer({
+      size: 4,
+      usage: B.MAP_READ | B.COPY_DST,
+    });
+    this.uniBuf = this.device.createBuffer({
+      size: 16,
+      usage: B.UNIFORM | B.COPY_DST,
+    });
 
     const cm = this.device.createShaderModule({ code: COMPUTE_SHADER });
     this.cpipe = this.device.createComputePipeline({
-      layout: 'auto',
-      compute: { module: cm, entryPoint: 'main' },
+      layout: "auto",
+      compute: { module: cm, entryPoint: "main" },
     });
 
     diffCanvas.width = width;
     diffCanvas.height = height;
-    this.ctx = diffCanvas.getContext('webgpu')!;
+    this.ctx = diffCanvas.getContext("webgpu")!;
     const fmt = navigator.gpu.getPreferredCanvasFormat();
-    this.ctx.configure({ device: this.device, format: fmt, alphaMode: 'opaque' });
+    this.ctx.configure({
+      device: this.device,
+      format: fmt,
+      alphaMode: "opaque",
+    });
 
     const rm = this.device.createShaderModule({ code: RENDER_SHADER });
     this.rpipe = this.device.createRenderPipeline({
-      layout: 'auto',
-      vertex: { module: rm, entryPoint: 'vs' },
-      fragment: { module: rm, entryPoint: 'fs', targets: [{ format: fmt }] },
-      primitive: { topology: 'triangle-strip' },
+      layout: "auto",
+      vertex: { module: rm, entryPoint: "vs" },
+      fragment: { module: rm, entryPoint: "fs", targets: [{ format: fmt }] },
+      primitive: { topology: "triangle-strip" },
     });
 
-    this.sampler = this.device.createSampler({ magFilter: 'nearest', minFilter: 'nearest' });
+    this.sampler = this.device.createSampler({
+      magFilter: "nearest",
+      minFilter: "nearest",
+    });
   }
 
-  async compare(frame: VideoFrame, threshold: number): Promise<{ diffCount: number; isFirst: boolean }> {
+  async compare(
+    frame: VideoFrame,
+    threshold: number,
+  ): Promise<{ diffCount: number; isFirst: boolean }> {
     // Always copy the new frame into currTex.
     this.device.queue.copyExternalImageToTexture(
       { source: frame as unknown as ImageBitmap },
@@ -149,7 +176,11 @@ export class Analyzer {
       return { diffCount: 0, isFirst: true };
     }
 
-    this.device.queue.writeBuffer(this.uniBuf, 0, new Float32Array([threshold, 0, 0, 0]));
+    this.device.queue.writeBuffer(
+      this.uniBuf,
+      0,
+      new Float32Array([threshold, 0, 0, 0]),
+    );
     this.device.queue.writeBuffer(this.counterBuf, 0, new Uint32Array([0]));
 
     const cBg = this.device.createBindGroup({
@@ -180,12 +211,14 @@ export class Analyzer {
     enc.copyBufferToBuffer(this.counterBuf, 0, this.readBuf, 0, 4);
 
     const rp = enc.beginRenderPass({
-      colorAttachments: [{
-        view: this.ctx.getCurrentTexture().createView(),
-        loadOp: 'clear',
-        storeOp: 'store',
-        clearValue: { r: 0, g: 0, b: 0, a: 1 },
-      }],
+      colorAttachments: [
+        {
+          view: this.ctx.getCurrentTexture().createView(),
+          loadOp: "clear",
+          storeOp: "store",
+          clearValue: { r: 0, g: 0, b: 0, a: 1 },
+        },
+      ],
     });
     rp.setPipeline(this.rpipe);
     rp.setBindGroup(0, rBg);
