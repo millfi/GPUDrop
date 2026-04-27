@@ -13,6 +13,13 @@ import MP4Box, {
 } from "mp4box";
 import { Analyzer } from "./analyzer";
 
+// How many decoded VideoFrames may be alive simultaneously waiting for
+// processFrame. Each open VideoFrame keeps a slot in the decoder's DPB / GPU
+// memory pinned, and Chrome will start corrupting reference frames if too
+// many pile up. processFrame paces against wall-clock, so without this cap
+// the decoder runs hundreds of frames ahead of playback.
+const MAX_OUTSTANDING_FRAMES = 8;
+
 export interface Stats {
   fps: number;
   frameTime: number; // seconds
@@ -53,13 +60,22 @@ export class Player {
   private firstTs = 0;
   private frameNumber = 0;
 
-  // FPS estimation state
-  private prevUniqueT = 0;
-  private lastFt = 0;
-  private uniqueTs: number[] = []; // timestamps (s) of unique frames in last window
+  // FPS estimation state. We sample frame time as the interval between
+  // consecutive unique frames, and report fps as its reciprocal — both are
+  // updated only when a new unique frame arrives, so they are strictly
+  // inverse and respond to hitches together.
+  private prevUniqueT = 0; // timestamp (s) of the most recent unique frame
+  private lastFt = 0; // most recent inter-unique interval (s)
 
-  // Sequential processing chain
+  // Sequential processing chain for decoded frames.
   private chain: Promise<void> = Promise.resolve();
+  // Sequence the encoded-sample feeder. mp4box.onSamples is a synchronous
+  // callback and we used to fire feedDecoder() with `void`, which let two
+  // feedDecoder() invocations run concurrently and race on decoder.decode()
+  // — that submits encoded chunks out of order and trashes the decoder.
+  private feedChain: Promise<void> = Promise.resolve();
+  // Decoded frames the decoder has emitted but processFrame hasn't closed yet.
+  private outstandingFrames = 0;
 
   constructor(opts: Options) {
     this.opts = opts;
@@ -86,7 +102,9 @@ export class Player {
 
     this.mp4.onSamples = (id, _user, samples) => {
       if (id !== this.trackId || !this.decoder) return;
-      void this.feedDecoder(samples);
+      // Serialise feed calls so concurrent invocations can't reorder
+      // decoder.decode() submissions.
+      this.feedChain = this.feedChain.then(() => this.feedDecoder(samples));
     };
 
     await this.streamFile();
@@ -156,8 +174,14 @@ export class Player {
   private async feedDecoder(samples: MP4Sample[]) {
     for (const s of samples) {
       if (this.stopped || !this.decoder) return;
-      // back-pressure on the decoder so memory doesn't run away
-      while (this.decoder.decodeQueueSize > 30) {
+      // Back-pressure on both encoded queue depth (memory) and decoded-frame
+      // backlog (DPB / GPU buffers). The second check is the important one:
+      // processFrame paces against wall-clock and the decoder runs ahead, so
+      // without this the decoder's reference frames eventually get clobbered.
+      while (
+        this.decoder.decodeQueueSize > 30 ||
+        this.outstandingFrames > MAX_OUTSTANDING_FRAMES
+      ) {
         await new Promise((r) => setTimeout(r, 5));
         if (this.stopped) return;
       }
@@ -173,6 +197,7 @@ export class Player {
   }
 
   private queueFrame(frame: VideoFrame) {
+    this.outstandingFrames++;
     this.chain = this.chain
       .then(() => this.processFrame(frame))
       .catch((e) => {
@@ -182,6 +207,9 @@ export class Player {
         } catch {
           /* already closed */
         }
+      })
+      .finally(() => {
+        this.outstandingFrames--;
       });
   }
 
@@ -229,36 +257,35 @@ export class Player {
     }
     frame.close();
 
-    // 3. FPS / duplicate logic
+    // 3. FPS / duplicate logic.
+    // frameTime = interval (s) between this unique frame and the previous
+    // unique frame; fps = 1 / frameTime. Both are updated only when a new
+    // unique frame arrives, so they're strictly inverse and a hitch makes
+    // frameTime spike and fps drop in the same instant. During a duplicate
+    // run we hold the last measured pair so the chart shows the most recent
+    // measurement instead of falling to zero.
     if (isFirst) {
       this.prevUniqueT = tSec;
-      this.uniqueTs.push(tSec);
-      this.opts.onStats({
-        fps: 0,
-        frameTime: 0,
-        timestamp: tSec,
-        frameNumber: this.frameNumber,
-      });
-      return;
-    }
-
-    const ratio = this.totalPixels > 0 ? diffCount / this.totalPixels : 0;
-    if (ratio <= this.frameThreshold) {
-      // Considered identical to the previous frame.
-      this.opts.onDuplicate({ timestamp: tSec, frameNumber: this.frameNumber });
     } else {
-      this.lastFt = tSec - this.prevUniqueT;
-      this.prevUniqueT = tSec;
-      this.uniqueTs.push(tSec);
+      const ratio = this.totalPixels > 0 ? diffCount / this.totalPixels : 0;
+      if (ratio <= this.frameThreshold) {
+        // Considered identical to the previous frame — hold lastFt.
+        this.opts.onDuplicate({
+          timestamp: tSec,
+          frameNumber: this.frameNumber,
+        });
+      } else {
+        this.lastFt = tSec - this.prevUniqueT;
+        this.prevUniqueT = tSec;
+      }
     }
 
-    // Trim sliding window of unique frames to the last 1 second.
-    while (this.uniqueTs.length > 0 && tSec - this.uniqueTs[0] > 1)
-      this.uniqueTs.shift();
+    const frameTime = this.lastFt; // seconds
+    const fps = frameTime > 0 ? 1 / frameTime : 0;
 
     this.opts.onStats({
-      fps: this.uniqueTs.length,
-      frameTime: this.lastFt,
+      fps,
+      frameTime,
       timestamp: tSec,
       frameNumber: this.frameNumber,
     });

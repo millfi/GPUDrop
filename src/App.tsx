@@ -16,6 +16,7 @@ export default function App() {
   const diffCanvas = useRef<HTMLCanvasElement>(null);
   const fpsCanvas = useRef<HTMLCanvasElement>(null);
   const ftCanvas = useRef<HTMLCanvasElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const playerRef = useRef<Player | null>(null);
   const historyRef = useRef<{ fps: number; ft: number }[]>([]);
 
@@ -32,6 +33,22 @@ export default function App() {
       playerRef.current?.stop();
     };
   }, []);
+
+  const unload = () => {
+    playerRef.current?.stop();
+    playerRef.current = null;
+    historyRef.current = [];
+    setFile(null);
+    setStats(null);
+    setEvents([]);
+    setRunning(false);
+    // Reset the file input so re-selecting the same file fires onChange.
+    if (fileInputRef.current) fileInputRef.current.value = "";
+    clearCanvas(videoCanvas.current);
+    clearCanvas(diffCanvas.current);
+    clearCanvas(fpsCanvas.current);
+    clearCanvas(ftCanvas.current);
+  };
 
   const start = async () => {
     if (!file) return;
@@ -91,6 +108,7 @@ export default function App() {
       <h1>FPS推定</h1>
       <div className="controls">
         <input
+          ref={fileInputRef}
           type="file"
           accept="video/mp4"
           onChange={(e) => setFile(e.target.files?.[0] ?? null)}
@@ -119,6 +137,9 @@ export default function App() {
         </label>
         <button onClick={start} disabled={!file || running}>
           開始
+        </button>
+        <button onClick={unload} disabled={!file && !running}>
+          アンロード
         </button>
         {running && <span>再生中…</span>}
       </div>
@@ -160,6 +181,19 @@ export default function App() {
       </div>
     </div>
   );
+}
+
+function clearCanvas(c: HTMLCanvasElement | null) {
+  if (!c) return;
+  const ctx = c.getContext("2d");
+  if (ctx) {
+    ctx.clearRect(0, 0, c.width, c.height);
+  } else {
+    // WebGPU-bound canvas (the diff canvas): assigning width clears it
+    // regardless of which context type was bound.
+    // eslint-disable-next-line no-self-assign
+    c.width = c.width;
+  }
 }
 
 function drawChart(
