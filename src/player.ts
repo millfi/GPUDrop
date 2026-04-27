@@ -41,6 +41,12 @@ interface Options {
   onStats: (s: Stats) => void;
   onDuplicate: (e: DupEvent) => void;
   onEnd?: () => void;
+  onPausedChange?: (paused: boolean) => void;
+}
+
+interface FrameSnapshot {
+  image: ImageBitmap;
+  stats: Stats;
 }
 
 export class Player {
@@ -59,6 +65,12 @@ export class Player {
   private startWall = 0;
   private firstTs = 0;
   private frameNumber = 0;
+  private paused = false;
+  private pauseStarted = 0;
+  private stepBudget = 0;
+  private pauseWaiters: (() => void)[] = [];
+  private frameHistory: FrameSnapshot[] = [];
+  private historyIndex = -1;
 
   // FPS estimation state. We sample frame time as the interval between
   // consecutive unique frames, and report fps as its reciprocal — both are
@@ -89,6 +101,47 @@ export class Player {
 
   setFrameThreshold(t: number) {
     this.frameThreshold = t;
+  }
+
+  pause() {
+    if (this.stopped || this.paused) return;
+    this.paused = true;
+    this.pauseStarted = performance.now();
+    this.opts.onPausedChange?.(true);
+  }
+
+  resume() {
+    if (this.stopped || !this.paused) return;
+    this.shiftPlaybackClock();
+    this.paused = false;
+    this.pauseStarted = 0;
+    this.resolvePauseWaiters();
+    this.opts.onPausedChange?.(false);
+  }
+
+  stepForward() {
+    if (this.stopped) return;
+    if (!this.paused) this.pause();
+
+    if (this.historyIndex >= 0 && this.historyIndex < this.frameHistory.length - 1) {
+      this.historyIndex++;
+      this.renderSnapshot(this.frameHistory[this.historyIndex]);
+      return;
+    }
+
+    this.shiftPlaybackClock();
+    this.pauseStarted = performance.now();
+    this.stepBudget++;
+    this.resolvePauseWaiters();
+  }
+
+  stepBackward() {
+    if (this.stopped || this.frameHistory.length < 2) return;
+    if (!this.paused) this.pause();
+    if (this.historyIndex < 0) this.historyIndex = this.frameHistory.length - 1;
+    if (this.historyIndex === 0) return;
+    this.historyIndex--;
+    this.renderSnapshot(this.frameHistory[this.historyIndex]);
   }
 
   async start() {
@@ -224,10 +277,16 @@ export class Player {
       this.firstTs = frame.timestamp;
     }
 
+    const stepping = await this.waitForPlaybackPermission();
+    if (this.stopped) {
+      frame.close();
+      return;
+    }
+
     const tSec = (frame.timestamp - this.firstTs) / 1_000_000;
     const target = this.startWall + tSec * 1000;
     const delay = target - performance.now();
-    if (delay > 0) await new Promise((r) => setTimeout(r, delay));
+    if (!stepping && delay > 0) await new Promise((r) => setTimeout(r, delay));
 
     if (this.stopped) {
       frame.close();
@@ -244,6 +303,9 @@ export class Player {
         this.opts.videoCanvas.height,
       );
     }
+    const snapshotImage = await createImageBitmap(
+      frame as unknown as ImageBitmapSource,
+    );
 
     this.frameNumber++;
 
@@ -283,17 +345,21 @@ export class Player {
     const frameTime = this.lastFt; // seconds
     const fps = frameTime > 0 ? 1 / frameTime : 0;
 
-    this.opts.onStats({
+    const stats = {
       fps,
       frameTime,
       timestamp: tSec,
       frameNumber: this.frameNumber,
-    });
+    };
+
+    this.pushHistory({ image: snapshotImage, stats });
+    this.opts.onStats(stats);
   }
 
   stop() {
     if (this.stopped) return;
     this.stopped = true;
+    this.resolvePauseWaiters();
     try {
       this.decoder?.close();
     } catch {
@@ -305,7 +371,58 @@ export class Player {
       /* */
     }
     this.analyzer?.destroy();
+    this.frameHistory.forEach((s) => s.image.close());
+    this.frameHistory = [];
     this.opts.onEnd?.();
+  }
+
+  private async waitForPlaybackPermission() {
+    while (this.paused && this.stepBudget === 0 && !this.stopped) {
+      await new Promise<void>((resolve) => {
+        this.pauseWaiters.push(resolve);
+      });
+    }
+    if (this.stepBudget > 0) {
+      this.stepBudget--;
+      return true;
+    }
+    return false;
+  }
+
+  private shiftPlaybackClock() {
+    if (this.pauseStarted === 0) return;
+    this.startWall += performance.now() - this.pauseStarted;
+  }
+
+  private resolvePauseWaiters() {
+    const waiters = this.pauseWaiters.splice(0);
+    waiters.forEach((resolve) => resolve());
+  }
+
+  private pushHistory(snapshot: FrameSnapshot) {
+    if (this.historyIndex >= 0 && this.historyIndex < this.frameHistory.length - 1) {
+      for (const old of this.frameHistory.splice(this.historyIndex + 1)) {
+        old.image.close();
+      }
+    }
+    this.frameHistory.push(snapshot);
+    while (this.frameHistory.length > 3) {
+      this.frameHistory.shift()?.image.close();
+    }
+    this.historyIndex = this.frameHistory.length - 1;
+  }
+
+  private renderSnapshot(snapshot: FrameSnapshot) {
+    if (this.vctx) {
+      this.vctx.drawImage(
+        snapshot.image,
+        0,
+        0,
+        this.opts.videoCanvas.width,
+        this.opts.videoCanvas.height,
+      );
+    }
+    this.opts.onStats(snapshot.stats);
   }
 }
 

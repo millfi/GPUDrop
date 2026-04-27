@@ -9,6 +9,7 @@ export default function App() {
   const [threshold, setThreshold] = useState(0.05);
   const [frameThreshold, setFrameThreshold] = useState(0);
   const [running, setRunning] = useState(false);
+  const [paused, setPaused] = useState(false);
   const [stats, setStats] = useState<Stats | null>(null);
   const [events, setEvents] = useState<DupEvent[]>([]);
 
@@ -42,6 +43,7 @@ export default function App() {
     setStats(null);
     setEvents([]);
     setRunning(false);
+    setPaused(false);
     // Reset the file input so re-selecting the same file fires onChange.
     if (fileInputRef.current) fileInputRef.current.value = "";
     clearCanvas(videoCanvas.current);
@@ -90,17 +92,37 @@ export default function App() {
           return next;
         });
       },
-      onEnd: () => setRunning(false),
+      onEnd: () => {
+        setRunning(false);
+        setPaused(false);
+      },
+      onPausedChange: setPaused,
     });
     playerRef.current = player;
     setRunning(true);
+    setPaused(false);
     try {
       await player.start();
     } catch (e) {
       console.error(e);
       alert((e as Error).message);
       setRunning(false);
+      setPaused(false);
     }
+  };
+
+  const togglePlayback = () => {
+    if (!playerRef.current) return;
+    if (paused) playerRef.current.resume();
+    else playerRef.current.pause();
+  };
+
+  const stepBackward = () => {
+    playerRef.current?.stepBackward();
+  };
+
+  const stepForward = () => {
+    playerRef.current?.stepForward();
   };
 
   return (
@@ -141,7 +163,39 @@ export default function App() {
         <button onClick={unload} disabled={!file && !running}>
           アンロード
         </button>
-        {running && <span>再生中…</span>}
+        <div className="player-controls">
+          <button
+            type="button"
+            className="icon-button"
+            onClick={stepBackward}
+            disabled={!running}
+            title="1フレーム戻る"
+            aria-label="1フレーム戻る"
+          >
+            <StepBackIcon />
+          </button>
+          <button
+            type="button"
+            className="icon-button"
+            onClick={togglePlayback}
+            disabled={!running}
+            title={paused ? "再生" : "一時停止"}
+            aria-label={paused ? "再生" : "一時停止"}
+          >
+            {paused ? <PlayIcon /> : <PauseIcon />}
+          </button>
+          <button
+            type="button"
+            className="icon-button"
+            onClick={stepForward}
+            disabled={!running}
+            title="1フレーム進む"
+            aria-label="1フレーム進む"
+          >
+            <StepForwardIcon />
+          </button>
+        </div>
+        {running && <span>{paused ? "一時停止中" : "再生中…"}</span>}
       </div>
 
       <div className="stats">
@@ -180,6 +234,38 @@ export default function App() {
         </div>
       </div>
     </div>
+  );
+}
+
+function PlayIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M8 5v14l11-7z" fill="currentColor" />
+    </svg>
+  );
+}
+
+function PauseIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M7 5h4v14H7zM13 5h4v14h-4z" fill="currentColor" />
+    </svg>
+  );
+}
+
+function StepBackIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M6 5h2v14H6zM18 6v12l-9-6z" fill="currentColor" />
+    </svg>
+  );
+}
+
+function StepForwardIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M16 5h2v14h-2zM6 6l9 6-9 6z" fill="currentColor" />
+    </svg>
   );
 }
 
