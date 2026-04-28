@@ -72,12 +72,11 @@ export class Player {
   private frameHistory: FrameSnapshot[] = [];
   private historyIndex = -1;
 
-  // FPS estimation state. We sample frame time as the interval between
-  // consecutive unique frames, and report fps as its reciprocal — both are
-  // updated only when a new unique frame arrives, so they are strictly
-  // inverse and respond to hitches together.
+  // FPS estimation state. frameTime is the interval between consecutive
+  // unique frames. fps is the count of unique frames in the last 1 second.
   private prevUniqueT = 0; // timestamp (s) of the most recent unique frame
   private lastFt = 0; // most recent inter-unique interval (s)
+  private uniqueTs: number[] = [];
 
   // Sequential processing chain for decoded frames.
   private chain: Promise<void> = Promise.resolve();
@@ -320,18 +319,14 @@ export class Player {
     frame.close();
 
     // 3. FPS / duplicate logic.
-    // frameTime = interval (s) between this unique frame and the previous
-    // unique frame; fps = 1 / frameTime. Both are updated only when a new
-    // unique frame arrives, so they're strictly inverse and a hitch makes
-    // frameTime spike and fps drop in the same instant. During a duplicate
-    // run we hold the last measured pair so the chart shows the most recent
-    // measurement instead of falling to zero.
+    // frameTime updates on unique frames. fps is the number of unique frames
+    // observed in the rolling 1-second window ending at this frame.
     if (isFirst) {
       this.prevUniqueT = tSec;
+      this.uniqueTs.push(tSec);
     } else {
       const ratio = this.totalPixels > 0 ? diffCount / this.totalPixels : 0;
       if (ratio <= this.frameThreshold) {
-        // Considered identical to the previous frame — hold lastFt.
         this.opts.onDuplicate({
           timestamp: tSec,
           frameNumber: this.frameNumber,
@@ -339,11 +334,15 @@ export class Player {
       } else {
         this.lastFt = tSec - this.prevUniqueT;
         this.prevUniqueT = tSec;
+        this.uniqueTs.push(tSec);
       }
+    }
+    while (this.uniqueTs.length > 0 && this.uniqueTs[0] <= tSec - 1) {
+      this.uniqueTs.shift();
     }
 
     const frameTime = this.lastFt; // seconds
-    const fps = frameTime > 0 ? 1 / frameTime : 0;
+    const fps = this.uniqueTs.length;
 
     const stats = {
       fps,

@@ -203,6 +203,11 @@ export default function App() {
           ? `t=${stats.timestamp.toFixed(3)}s  frame#${stats.frameNumber}  fps=${stats.fps}  frameTime=${(stats.frameTime * 1000).toFixed(2)}ms`
           : "—"}
       </div>
+      <div className="stats">
+        {stats
+          ? `現在値: fps=${stats.fps}  frameTime=${(stats.frameTime * 1000).toFixed(2)}ms`
+          : "現在値: —"}
+      </div>
 
       <div className="grid">
         <div>
