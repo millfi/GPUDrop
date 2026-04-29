@@ -19,6 +19,8 @@ import { Analyzer } from "./analyzer";
 // many pile up. processFrame paces against wall-clock, so without this cap
 // the decoder runs hundreds of frames ahead of playback.
 const MAX_OUTSTANDING_FRAMES = 8;
+const FILE_CHUNK_SIZE = 4 * 1024 * 1024;
+const MAX_QUEUED_SAMPLE_BYTES = 64 * 1024 * 1024;
 
 export interface Stats {
   fps: number;
@@ -87,6 +89,10 @@ export class Player {
   private feedChain: Promise<void> = Promise.resolve();
   // Decoded frames the decoder has emitted but processFrame hasn't closed yet.
   private outstandingFrames = 0;
+  // Compressed sample data extracted by mp4box but not yet submitted to
+  // VideoDecoder. Keep this bounded so multi-GB files do not accumulate in JS.
+  private queuedSampleBytes = 0;
+  private readyPromise: Promise<void> | null = null;
 
   constructor(opts: Options) {
     this.opts = opts;
@@ -149,14 +155,20 @@ export class Player {
     this.mp4.onError = (e) => console.error("[mp4box]", e);
 
     this.mp4.onReady = (info) => {
-      void this.handleReady(info);
+      this.readyPromise = this.handleReady(info);
+      void this.readyPromise;
     };
 
     this.mp4.onSamples = (id, _user, samples) => {
       if (id !== this.trackId || !this.decoder) return;
+      this.queuedSampleBytes += getSampleByteLength(samples);
       // Serialise feed calls so concurrent invocations can't reorder
       // decoder.decode() submissions.
-      this.feedChain = this.feedChain.then(() => this.feedDecoder(samples));
+      this.feedChain = this.feedChain
+        .catch((e) => {
+          console.error(e);
+        })
+        .then(() => this.feedDecoder(samples));
     };
 
     await this.streamFile();
@@ -206,26 +218,36 @@ export class Player {
   }
 
   private async streamFile() {
-    const reader = this.opts.file.stream().getReader();
     let offset = 0;
-    while (true) {
+    while (offset < this.opts.file.size) {
       if (this.stopped) return;
-      const { done, value } = await reader.read();
-      if (done) break;
-      const ab = value.buffer.slice(
-        value.byteOffset,
-        value.byteOffset + value.byteLength,
-      ) as MP4ArrayBuffer;
+      await this.waitForDemuxBackpressure();
+      if (this.stopped) return;
+
+      const end = Math.min(offset + FILE_CHUNK_SIZE, this.opts.file.size);
+      const ab = (await this.opts.file
+        .slice(offset, end)
+        .arrayBuffer()) as MP4ArrayBuffer;
       ab.fileStart = offset;
-      this.mp4!.appendBuffer(ab);
-      offset += value.byteLength;
+      const nextOffset = this.mp4!.appendBuffer(ab);
+      if (this.readyPromise) await this.readyPromise;
+
+      if (typeof nextOffset === "number" && Number.isFinite(nextOffset)) {
+        offset = nextOffset === offset ? end : nextOffset;
+      } else {
+        offset = end;
+      }
     }
     if (!this.stopped) this.mp4!.flush();
   }
 
   private async feedDecoder(samples: MP4Sample[]) {
-    for (const s of samples) {
-      if (this.stopped || !this.decoder) return;
+    for (let i = 0; i < samples.length; i++) {
+      const s = samples[i];
+      if (this.stopped || !this.decoder) {
+        this.releaseSampleData(s);
+        continue;
+      }
       // Back-pressure on both encoded queue depth (memory) and decoded-frame
       // backlog (DPB / GPU buffers). The second check is the important one:
       // processFrame paces against wall-clock and the decoder runs ahead, so
@@ -235,16 +257,47 @@ export class Player {
         this.outstandingFrames > MAX_OUTSTANDING_FRAMES
       ) {
         await new Promise((r) => setTimeout(r, 5));
-        if (this.stopped) return;
+        if (this.stopped) {
+          for (let j = i; j < samples.length; j++) {
+            this.releaseSampleData(samples[j]);
+          }
+          return;
+        }
       }
-      this.decoder.decode(
-        new EncodedVideoChunk({
-          type: s.is_sync ? "key" : "delta",
-          timestamp: (s.cts * 1_000_000) / s.timescale,
-          duration: (s.duration * 1_000_000) / s.timescale,
-          data: s.data,
-        }),
-      );
+      const data = s.data;
+      try {
+        this.decoder.decode(
+          new EncodedVideoChunk({
+            type: s.is_sync ? "key" : "delta",
+            timestamp: (s.cts * 1_000_000) / s.timescale,
+            duration: (s.duration * 1_000_000) / s.timescale,
+            data,
+          }),
+        );
+      } finally {
+        this.releaseSampleData(s);
+      }
+    }
+  }
+
+  private async waitForDemuxBackpressure() {
+    while (
+      !this.stopped &&
+      (this.queuedSampleBytes > MAX_QUEUED_SAMPLE_BYTES ||
+        (this.decoder &&
+          (this.decoder.decodeQueueSize > 30 ||
+            this.outstandingFrames > MAX_OUTSTANDING_FRAMES)))
+    ) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+  }
+
+  private releaseSampleData(sample: MP4Sample) {
+    const bytes = getSampleByteLength(sample);
+    try {
+      this.mp4?.releaseUsedSamples(this.trackId, sample.number + 1);
+    } finally {
+      this.queuedSampleBytes = Math.max(0, this.queuedSampleBytes - bytes);
     }
   }
 
@@ -442,4 +495,11 @@ function getCodecDescription(mp4: MP4File, trackId: number): Uint8Array {
     }
   }
   throw new Error("コーデック設定が見つかりません");
+}
+
+function getSampleByteLength(sample: MP4Sample | MP4Sample[]): number {
+  if (Array.isArray(sample)) {
+    return sample.reduce((sum, s) => sum + getSampleByteLength(s), 0);
+  }
+  return sample.data?.byteLength ?? sample.size ?? 0;
 }

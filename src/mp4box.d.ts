@@ -17,6 +17,8 @@ declare module "mp4box" {
   }
 
   export interface MP4Sample {
+    number: number;
+    size: number;
     is_sync: boolean;
     cts: number;
     dts: number;
@@ -31,10 +33,11 @@ declare module "mp4box" {
     onSamples:
       | ((id: number, user: unknown, samples: MP4Sample[]) => void)
       | null;
-    appendBuffer(buffer: MP4ArrayBuffer): number;
+    appendBuffer(buffer: MP4ArrayBuffer, last?: boolean): number | undefined;
     flush(): void;
     start(): void;
     stop(): void;
+    releaseUsedSamples(id: number, sampleNumber: number): void;
     setExtractionOptions(
       id: number,
       user?: unknown,
