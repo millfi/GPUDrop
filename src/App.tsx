@@ -12,15 +12,10 @@ const ACCEPTED_MEDIA_TYPES = [
   ".mkv",
   ".webm",
   ".ogv",
-  ".ogg",
   ".ts",
   ".m2ts",
   ".mts",
   ".m3u8",
-  ".mp3",
-  ".wav",
-  ".flac",
-  ".aac",
 ].join(",");
 
 export default function App() {

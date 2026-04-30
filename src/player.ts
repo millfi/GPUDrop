@@ -431,7 +431,8 @@ export class Player {
     if (cached) return cached;
 
     const record = this.frameRecords[recordIndex];
-    if (!record) throw new Error(`フレーム履歴が見つかりません: ${recordIndex}`);
+    if (!record)
+      throw new Error(`フレーム履歴が見つかりません: ${recordIndex}`);
 
     const image = await this.decodeFrameImage(recordIndex);
     try {
