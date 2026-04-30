@@ -21,7 +21,7 @@ const ACCEPTED_MEDIA_TYPES = [
 export default function App() {
   const [file, setFile] = useState<File | null>(null);
   const [threshold, setThreshold] = useState(0.05);
-  const [frameThreshold, setFrameThreshold] = useState(0);
+  const [frameThreshold, setFrameThreshold] = useState(0.0006);
   const [running, setRunning] = useState(false);
   const [paused, setPaused] = useState(false);
   const [duration, setDuration] = useState(0);
