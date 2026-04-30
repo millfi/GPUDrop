@@ -22,7 +22,7 @@ npm run dev
 ## 必要環境
 
 - Chrome / Edge (WebGPU + WebCodecs対応)
-- 入力: H.264 / H.265 / VP9 / AV1 のMP4
+- 入力: MediaBunnyが対応する動画コーデック/コンテナ
 
 ## 操作
 
