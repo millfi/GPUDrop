@@ -1,8 +1,27 @@
-import { useEffect, useRef, useState } from "react";
-import { Player, type Stats, type DupEvent } from "./player";
+import { useEffect, useRef, useState, type ChangeEvent } from "react";
+import { Player, type Stats, type DupEvent, type StatsEvent } from "./player";
 
 const HISTORY_CAP = 600;
 const EVENTS_CAP = 100;
+const ACCEPTED_MEDIA_TYPES = [
+  "video/*",
+  ".mp4",
+  ".m4v",
+  ".mov",
+  ".qt",
+  ".mkv",
+  ".webm",
+  ".ogv",
+  ".ogg",
+  ".ts",
+  ".m2ts",
+  ".mts",
+  ".m3u8",
+  ".mp3",
+  ".wav",
+  ".flac",
+  ".aac",
+].join(",");
 
 export default function App() {
   const [file, setFile] = useState<File | null>(null);
@@ -20,6 +39,7 @@ export default function App() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const playerRef = useRef<Player | null>(null);
   const historyRef = useRef<{ fps: number; ft: number }[]>([]);
+  const historyIndexRef = useRef(-1);
 
   useEffect(() => {
     playerRef.current?.setThreshold(threshold);
@@ -35,27 +55,42 @@ export default function App() {
     };
   }, []);
 
-  const unload = () => {
+  const unload = (options: { resetFileInput?: boolean } = {}) => {
+    const { resetFileInput = true } = options;
     playerRef.current?.stop();
     playerRef.current = null;
     historyRef.current = [];
+    historyIndexRef.current = -1;
     setFile(null);
     setStats(null);
     setEvents([]);
     setRunning(false);
     setPaused(false);
     // Reset the file input so re-selecting the same file fires onChange.
-    if (fileInputRef.current) fileInputRef.current.value = "";
+    if (resetFileInput && fileInputRef.current) fileInputRef.current.value = "";
     clearCanvas(videoCanvas.current);
     clearCanvas(diffCanvas.current);
     clearCanvas(fpsCanvas.current);
     clearCanvas(ftCanvas.current);
   };
 
+  const handleFileChange = (e: ChangeEvent<HTMLInputElement>) => {
+    const nextFile = e.target.files?.[0] ?? null;
+    if (!nextFile) {
+      unload();
+      return;
+    }
+    if (file || running || playerRef.current) {
+      unload({ resetFileInput: false });
+    }
+    setFile(nextFile);
+  };
+
   const start = async () => {
     if (!file) return;
     playerRef.current?.stop();
     historyRef.current = [];
+    historyIndexRef.current = -1;
     setEvents([]);
     setStats(null);
 
@@ -65,26 +100,7 @@ export default function App() {
       diffCanvas: diffCanvas.current!,
       threshold,
       frameThreshold,
-      onStats: (s) => {
-        setStats(s);
-        const h = historyRef.current;
-        h.push({ fps: s.fps, ft: s.frameTime * 1000 });
-        if (h.length > HISTORY_CAP) h.shift();
-        drawChart(
-          fpsCanvas.current,
-          h.map((x) => x.fps),
-          0,
-          144,
-          "#0f0",
-        );
-        drawChart(
-          ftCanvas.current,
-          h.map((x) => x.ft),
-          0,
-          100,
-          "#0cf",
-        );
-      },
+      onStats: updateStats,
       onDuplicate: (e) => {
         setEvents((prev) => {
           const next = [e, ...prev];
@@ -118,11 +134,47 @@ export default function App() {
   };
 
   const stepBackward = () => {
-    playerRef.current?.stepBackward();
+    void playerRef.current?.stepBackward().catch(console.error);
   };
 
   const stepForward = () => {
-    playerRef.current?.stepForward();
+    void playerRef.current?.stepForward().catch(console.error);
+  };
+
+  const updateStats = (s: Stats, e?: StatsEvent) => {
+    setStats(s);
+    const h = historyRef.current;
+    if (e?.historyDelta) {
+      historyIndexRef.current = clamp(
+        historyIndexRef.current + e.historyDelta,
+        0,
+        h.length - 1,
+      );
+    } else {
+      h.push({ fps: s.fps, ft: s.frameTime * 1000 });
+      historyIndexRef.current = h.length - 1;
+    }
+    drawHistoryCharts();
+  };
+
+  const drawHistoryCharts = () => {
+    const end = historyIndexRef.current + 1;
+    const start = Math.max(0, end - HISTORY_CAP);
+    const visibleHistory = historyRef.current.slice(start, end);
+    drawChart(
+      fpsCanvas.current,
+      visibleHistory.map((x) => x.fps),
+      0,
+      144,
+      "#0f0",
+    );
+    drawChart(
+      ftCanvas.current,
+      visibleHistory.map((x) => x.ft),
+      0,
+      100,
+      "#0cf",
+    );
   };
 
   return (
@@ -132,8 +184,8 @@ export default function App() {
         <input
           ref={fileInputRef}
           type="file"
-          accept="video/mp4"
-          onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+          accept={ACCEPTED_MEDIA_TYPES}
+          onChange={handleFileChange}
         />
         <label>
           ピクセル閾値: {threshold.toFixed(3)}
@@ -159,9 +211,6 @@ export default function App() {
         </label>
         <button onClick={start} disabled={!file || running}>
           開始
-        </button>
-        <button onClick={unload} disabled={!file && !running}>
-          アンロード
         </button>
         <div className="player-controls">
           <button
@@ -285,6 +334,11 @@ function clearCanvas(c: HTMLCanvasElement | null) {
     // eslint-disable-next-line no-self-assign
     c.width = c.width;
   }
+}
+
+function clamp(v: number, min: number, max: number) {
+  if (max < min) return min;
+  return Math.max(min, Math.min(max, v));
 }
 
 function drawChart(

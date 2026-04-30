@@ -78,6 +78,8 @@ export class Analyzer {
   private rpipe!: GPURenderPipeline;
   private prevTex!: GPUTexture;
   private currTex!: GPUTexture;
+  private scratchPrevTex!: GPUTexture;
+  private scratchCurrTex!: GPUTexture;
   private diffTex!: GPUTexture;
   private counterBuf!: GPUBuffer;
   private readBuf!: GPUBuffer;
@@ -87,6 +89,7 @@ export class Analyzer {
   private w = 0;
   private h = 0;
   private hasPrev = false;
+  private workChain: Promise<void> = Promise.resolve();
 
   async init(width: number, height: number, diffCanvas: HTMLCanvasElement) {
     if (!navigator.gpu) throw new Error("このブラウザは WebGPU 非対応です");
@@ -108,10 +111,21 @@ export class Analyzer {
       format: "rgba8unorm",
       usage: texUsage,
     });
+    this.scratchPrevTex = this.device.createTexture({
+      size: [width, height],
+      format: "rgba8unorm",
+      usage: texUsage,
+    });
+    this.scratchCurrTex = this.device.createTexture({
+      size: [width, height],
+      format: "rgba8unorm",
+      usage: texUsage,
+    });
     this.diffTex = this.device.createTexture({
       size: [width, height],
       format: "rgba8unorm",
-      usage: U.TEXTURE_BINDING | U.STORAGE_BINDING,
+      usage:
+        U.TEXTURE_BINDING | U.STORAGE_BINDING | U.COPY_DST | U.RENDER_ATTACHMENT,
     });
 
     const B = GPUBufferUsage;
@@ -162,6 +176,46 @@ export class Analyzer {
     frame: VideoFrame,
     threshold: number,
   ): Promise<{ diffCount: number; isFirst: boolean }> {
+    return this.enqueueWork(() => this.compareImpl(frame, threshold));
+  }
+
+  async renderDiffImage(image: ImageBitmap) {
+    await this.enqueueWork(() => this.renderDiffImageImpl(image));
+  }
+
+  async renderDiffBetween(
+    prevImage: ImageBitmap,
+    currImage: ImageBitmap,
+    threshold: number,
+  ) {
+    await this.enqueueWork(async () => {
+      this.device.queue.copyExternalImageToTexture(
+        { source: prevImage },
+        { texture: this.scratchPrevTex },
+        [this.w, this.h],
+      );
+      this.device.queue.copyExternalImageToTexture(
+        { source: currImage },
+        { texture: this.scratchCurrTex },
+        [this.w, this.h],
+      );
+      await this.computeAndRenderDiff(
+        this.scratchPrevTex,
+        this.scratchCurrTex,
+        threshold,
+        false,
+      );
+    });
+  }
+
+  async renderBlankDiff() {
+    await this.enqueueWork(() => this.renderBlankDiffImpl());
+  }
+
+  private async compareImpl(
+    frame: VideoFrame,
+    threshold: number,
+  ): Promise<{ diffCount: number; isFirst: boolean }> {
     // Always copy the new frame into currTex.
     this.device.queue.copyExternalImageToTexture(
       { source: frame as unknown as ImageBitmap },
@@ -173,9 +227,28 @@ export class Analyzer {
       this.hasPrev = true;
       // Promote the new frame to "previous" for the next call.
       [this.prevTex, this.currTex] = [this.currTex, this.prevTex];
+      await this.renderBlankDiffImpl();
       return { diffCount: 0, isFirst: true };
     }
 
+    const count = await this.computeAndRenderDiff(
+      this.prevTex,
+      this.currTex,
+      threshold,
+      true,
+    );
+
+    [this.prevTex, this.currTex] = [this.currTex, this.prevTex];
+
+    return { diffCount: count, isFirst: false };
+  }
+
+  private async computeAndRenderDiff(
+    prevTex: GPUTexture,
+    currTex: GPUTexture,
+    threshold: number,
+    readCount: boolean,
+  ) {
     this.device.queue.writeBuffer(
       this.uniBuf,
       0,
@@ -186,19 +259,11 @@ export class Analyzer {
     const cBg = this.device.createBindGroup({
       layout: this.cpipe.getBindGroupLayout(0),
       entries: [
-        { binding: 0, resource: this.prevTex.createView() },
-        { binding: 1, resource: this.currTex.createView() },
+        { binding: 0, resource: prevTex.createView() },
+        { binding: 1, resource: currTex.createView() },
         { binding: 2, resource: this.diffTex.createView() },
         { binding: 3, resource: { buffer: this.counterBuf } },
         { binding: 4, resource: { buffer: this.uniBuf } },
-      ],
-    });
-
-    const rBg = this.device.createBindGroup({
-      layout: this.rpipe.getBindGroupLayout(0),
-      entries: [
-        { binding: 0, resource: this.diffTex.createView() },
-        { binding: 1, resource: this.sampler },
       ],
     });
 
@@ -208,7 +273,64 @@ export class Analyzer {
     cp.setBindGroup(0, cBg);
     cp.dispatchWorkgroups(Math.ceil(this.w / 8), Math.ceil(this.h / 8));
     cp.end();
-    enc.copyBufferToBuffer(this.counterBuf, 0, this.readBuf, 0, 4);
+    if (readCount) enc.copyBufferToBuffer(this.counterBuf, 0, this.readBuf, 0, 4);
+    this.encodeDiffRender(enc);
+
+    this.device.queue.submit([enc.finish()]);
+
+    if (!readCount) {
+      await this.device.queue.onSubmittedWorkDone();
+      return 0;
+    }
+
+    await Promise.all([
+      this.readBuf.mapAsync(GPUMapMode.READ),
+      this.device.queue.onSubmittedWorkDone(),
+    ]);
+    const count = new Uint32Array(this.readBuf.getMappedRange().slice(0))[0];
+    this.readBuf.unmap();
+    return count;
+  }
+
+  private async renderDiffImageImpl(image: ImageBitmap) {
+    this.device.queue.copyExternalImageToTexture(
+      { source: image },
+      { texture: this.diffTex },
+      [this.w, this.h],
+    );
+
+    const enc = this.device.createCommandEncoder();
+    this.encodeDiffRender(enc);
+    this.device.queue.submit([enc.finish()]);
+    await this.device.queue.onSubmittedWorkDone();
+  }
+
+  private async renderBlankDiffImpl() {
+    const enc = this.device.createCommandEncoder();
+    const rp = enc.beginRenderPass({
+      colorAttachments: [
+        {
+          view: this.diffTex.createView(),
+          loadOp: "clear",
+          storeOp: "store",
+          clearValue: { r: 0, g: 0, b: 0, a: 1 },
+        },
+      ],
+    });
+    rp.end();
+    this.encodeDiffRender(enc);
+    this.device.queue.submit([enc.finish()]);
+    await this.device.queue.onSubmittedWorkDone();
+  }
+
+  private encodeDiffRender(enc: GPUCommandEncoder) {
+    const rBg = this.device.createBindGroup({
+      layout: this.rpipe.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: this.diffTex.createView() },
+        { binding: 1, resource: this.sampler },
+      ],
+    });
 
     const rp = enc.beginRenderPass({
       colorAttachments: [
@@ -224,25 +346,26 @@ export class Analyzer {
     rp.setBindGroup(0, rBg);
     rp.draw(4);
     rp.end();
-
-    this.device.queue.submit([enc.finish()]);
-
-    await this.readBuf.mapAsync(GPUMapMode.READ);
-    const count = new Uint32Array(this.readBuf.getMappedRange().slice(0))[0];
-    this.readBuf.unmap();
-
-    [this.prevTex, this.currTex] = [this.currTex, this.prevTex];
-
-    return { diffCount: count, isFirst: false };
   }
 
   destroy() {
     this.prevTex?.destroy();
     this.currTex?.destroy();
+    this.scratchPrevTex?.destroy();
+    this.scratchCurrTex?.destroy();
     this.diffTex?.destroy();
     this.counterBuf?.destroy();
     this.readBuf?.destroy();
     this.uniBuf?.destroy();
     this.device?.destroy();
+  }
+
+  private enqueueWork<T>(action: () => Promise<T>) {
+    const run = this.workChain.then(action);
+    this.workChain = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
   }
 }
