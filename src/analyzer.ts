@@ -212,6 +212,13 @@ export class Analyzer {
     await this.enqueueWork(() => this.renderBlankDiffImpl());
   }
 
+  async reset() {
+    await this.enqueueWork(async () => {
+      this.hasPrev = false;
+      await this.renderBlankDiffImpl();
+    });
+  }
+
   private async compareImpl(
     frame: VideoFrame,
     threshold: number,

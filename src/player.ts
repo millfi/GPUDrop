@@ -34,6 +34,11 @@ export interface StatsEvent {
   historyDelta?: number;
 }
 
+export interface SeekInfo {
+  timestamp: number;
+  duration: number;
+}
+
 interface Options {
   file: File;
   videoCanvas: HTMLCanvasElement;
@@ -43,6 +48,7 @@ interface Options {
   onStats: (s: Stats, e?: StatsEvent) => void;
   onDuplicate: (e: DupEvent) => void;
   onEnd?: () => void;
+  onReady?: (info: SeekInfo) => void;
   onPausedChange?: (paused: boolean) => void;
 }
 
@@ -71,18 +77,22 @@ export class Player {
   private frameThreshold: number;
   private totalPixels = 0;
   private stopped = false;
+  private mediaStartTime = 0;
+  private duration = 0;
 
   // playback state
   private vctx: CanvasRenderingContext2D | null = null;
   private startWall = 0;
-  private firstTs = 0;
+  private playbackBaseTs = 0;
   private frameNumber = 0;
   private paused = false;
   private pauseStarted = 0;
   private stepBudget = 0;
   private stepChain: Promise<void> = Promise.resolve();
+  private seekTargetTime: number | null = null;
   private activeFrameDone: Promise<void> | null = null;
   private resolveActiveFrameDone: (() => void) | null = null;
+  private delayWaiters: (() => void)[] = [];
   private pauseWaiters: (() => void)[] = [];
   private frameRecords: FrameRecord[] = [];
   private snapshotSlots: (SnapshotCacheEntry | null)[] = new Array(
@@ -136,6 +146,17 @@ export class Player {
     return this.enqueueStep(() => this.stepBackwardImpl());
   }
 
+  seek(timestamp: number) {
+    if (this.stopped || !this.sampleSink) return Promise.resolve();
+
+    const target = this.mediaStartTime + clamp(timestamp, 0, this.duration);
+    this.seekTargetTime = target;
+    if (this.paused) this.stepBudget = 1;
+    this.resolvePauseWaiters();
+    this.resolveDelayWaiters();
+    return Promise.resolve();
+  }
+
   private async stepForwardImpl() {
     if (this.stopped) return;
     if (!this.paused) this.pause();
@@ -186,6 +207,16 @@ export class Player {
           `このブラウザでは動画コーデックをデコードできません${codec ? ` (${codec})` : ""}`,
         );
       }
+      this.mediaStartTime = await track.getFirstTimestamp();
+      const metadataEnd = await this.input.getDurationFromMetadata([track], {
+        skipLiveWait: true,
+      });
+      const endTime =
+        metadataEnd ??
+        (await this.input.computeDuration([track], { skipLiveWait: true }));
+      this.duration = Math.max(0, endTime - this.mediaStartTime);
+      this.opts.onReady?.({ timestamp: 0, duration: this.duration });
+
       const w = await track.getCodedWidth();
       const h = await track.getCodedHeight();
       this.totalPixels = w * h;
@@ -199,13 +230,7 @@ export class Player {
 
       const sink = new VideoSampleSink(track);
       this.sampleSink = sink;
-      for await (const sample of sink.samples()) {
-        if (this.stopped) {
-          sample.close();
-          break;
-        }
-        await this.processSample(sample);
-      }
+      await this.playSamplesFrom(this.mediaStartTime);
       if (!this.stopped) this.stop();
     } catch (e) {
       if (this.stopped) return;
@@ -232,15 +257,49 @@ export class Player {
     }
   }
 
+  private async playSamplesFrom(startTime: number) {
+    const sink = this.sampleSink;
+    if (!sink) return;
+
+    let nextStartTime = startTime;
+    while (!this.stopped) {
+      let restart = false;
+      this.resetPlaybackClock();
+
+      for await (const sample of sink.samples(nextStartTime)) {
+        if (this.stopped) {
+          sample.close();
+          return;
+        }
+
+        const seekTarget = this.takeSeekTarget();
+        if (seekTarget !== null) {
+          sample.close();
+          nextStartTime = seekTarget;
+          await this.resetAfterSeek(seekTarget);
+          restart = true;
+          break;
+        }
+
+        await this.processSample(sample);
+
+        const nextSeekTarget = this.takeSeekTarget();
+        if (nextSeekTarget !== null) {
+          nextStartTime = nextSeekTarget;
+          await this.resetAfterSeek(nextSeekTarget);
+          restart = true;
+          break;
+        }
+      }
+
+      if (!restart) return;
+    }
+  }
+
   private async processFrame(frame: VideoFrame, sampleTimestamp: number) {
     if (this.stopped) {
       frame.close();
       return;
-    }
-
-    if (this.startWall === 0) {
-      this.startWall = performance.now();
-      this.firstTs = frame.timestamp;
     }
 
     let stepping = await this.waitForPlaybackPermission();
@@ -249,16 +308,26 @@ export class Player {
       return;
     }
 
-    const tSec = (frame.timestamp - this.firstTs) / 1_000_000;
-    const target = this.startWall + tSec * 1000;
+    if (this.seekTargetTime !== null) {
+      frame.close();
+      return;
+    }
+
+    if (this.startWall === 0) {
+      this.startWall = performance.now();
+      this.playbackBaseTs = frame.timestamp;
+    }
+
+    const tSec = frame.timestamp / 1_000_000 - this.mediaStartTime;
+    const target = this.startWall + (frame.timestamp - this.playbackBaseTs) / 1000;
     const delay = target - performance.now();
-    if (!stepping && delay > 0) await new Promise((r) => setTimeout(r, delay));
+    if (!stepping && delay > 0) await this.waitForDelay(delay);
 
     if (!stepping) {
       stepping = await this.waitForPlaybackPermission();
     }
 
-    if (this.stopped) {
+    if (this.stopped || this.seekTargetTime !== null) {
       frame.close();
       return;
     }
@@ -291,6 +360,12 @@ export class Player {
       }
       const diffSnapshotImage = await createImageBitmap(this.opts.diffCanvas);
       frame.close();
+
+      if (this.seekTargetTime !== null) {
+        snapshotImage.close();
+        diffSnapshotImage.close();
+        return;
+      }
 
       // 3. FPS / duplicate logic.
       // frameTime updates on unique frames. fps is the number of unique frames
@@ -344,6 +419,7 @@ export class Player {
     if (this.stopped) return;
     this.stopped = true;
     this.resolvePauseWaiters();
+    this.resolveDelayWaiters();
     this.resolveActiveFrameDone?.();
     this.resolveActiveFrameDone = null;
     this.activeFrameDone = null;
@@ -356,13 +432,17 @@ export class Player {
     this.sampleSink = null;
     this.analyzer?.destroy();
     this.clearSnapshotCache();
-    this.frameRecords = [];
-    this.historyIndex = -1;
+    this.resetHistoryState();
     this.opts.onEnd?.();
   }
 
   private async waitForPlaybackPermission() {
-    while (this.paused && this.stepBudget === 0 && !this.stopped) {
+    while (
+      this.paused &&
+      this.stepBudget === 0 &&
+      !this.stopped &&
+      this.seekTargetTime === null
+    ) {
       await new Promise<void>((resolve) => {
         this.pauseWaiters.push(resolve);
       });
@@ -372,6 +452,26 @@ export class Player {
       return true;
     }
     return false;
+  }
+
+  private async waitForDelay(delay: number) {
+    await new Promise<void>((resolve) => {
+      let timeout = 0;
+
+      const resolveEarly = () => {
+        window.clearTimeout(timeout);
+        done();
+      };
+
+      const done = () => {
+        const index = this.delayWaiters.indexOf(resolveEarly);
+        if (index >= 0) this.delayWaiters.splice(index, 1);
+        resolve();
+      };
+
+      timeout = window.setTimeout(done, delay);
+      this.delayWaiters.push(resolveEarly);
+    });
   }
 
   private beginActiveFrame() {
@@ -398,6 +498,46 @@ export class Player {
   private resolvePauseWaiters() {
     const waiters = this.pauseWaiters.splice(0);
     waiters.forEach((resolve) => resolve());
+  }
+
+  private resolveDelayWaiters() {
+    const waiters = this.delayWaiters.splice(0);
+    waiters.forEach((resolve) => resolve());
+  }
+
+  private takeSeekTarget() {
+    const target = this.seekTargetTime;
+    this.seekTargetTime = null;
+    return target;
+  }
+
+  private async resetAfterSeek(targetTime: number) {
+    this.resetPlaybackClock();
+    this.resetHistoryState();
+    this.resetFpsState();
+    await this.analyzer?.reset();
+    this.opts.onReady?.({
+      timestamp: clamp(targetTime - this.mediaStartTime, 0, this.duration),
+      duration: this.duration,
+    });
+  }
+
+  private resetPlaybackClock() {
+    this.startWall = 0;
+    this.playbackBaseTs = 0;
+  }
+
+  private resetHistoryState() {
+    this.clearSnapshotCache();
+    this.frameRecords = [];
+    this.historyIndex = -1;
+  }
+
+  private resetFpsState() {
+    this.frameNumber = 0;
+    this.prevUniqueT = 0;
+    this.lastFt = 0;
+    this.uniqueTs = [];
   }
 
   private pushRecord(record: FrameRecord) {
@@ -541,4 +681,9 @@ export class Player {
     this.stepChain = run.catch(() => undefined);
     return run;
   }
+}
+
+function clamp(v: number, min: number, max: number) {
+  if (max < min) return min;
+  return Math.max(min, Math.min(max, v));
 }

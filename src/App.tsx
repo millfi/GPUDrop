@@ -24,6 +24,8 @@ export default function App() {
   const [frameThreshold, setFrameThreshold] = useState(0);
   const [running, setRunning] = useState(false);
   const [paused, setPaused] = useState(false);
+  const [duration, setDuration] = useState(0);
+  const [seekValue, setSeekValue] = useState(0);
   const [stats, setStats] = useState<Stats | null>(null);
   const [events, setEvents] = useState<DupEvent[]>([]);
 
@@ -59,6 +61,8 @@ export default function App() {
     setFile(null);
     setStats(null);
     setEvents([]);
+    setDuration(0);
+    setSeekValue(0);
     setRunning(false);
     setPaused(false);
     // Reset the file input so re-selecting the same file fires onChange.
@@ -88,6 +92,8 @@ export default function App() {
     historyIndexRef.current = -1;
     setEvents([]);
     setStats(null);
+    setDuration(0);
+    setSeekValue(0);
 
     const player = new Player({
       file,
@@ -106,6 +112,10 @@ export default function App() {
       onEnd: () => {
         setRunning(false);
         setPaused(false);
+      },
+      onReady: ({ timestamp, duration }) => {
+        setDuration(duration);
+        setSeekValue(timestamp);
       },
       onPausedChange: setPaused,
     });
@@ -136,8 +146,16 @@ export default function App() {
     void playerRef.current?.stepForward().catch(console.error);
   };
 
+  const seek = (value: number) => {
+    setSeekValue(value);
+    resetAnalysisHistory();
+    setEvents([]);
+    void playerRef.current?.seek(value).catch(console.error);
+  };
+
   const updateStats = (s: Stats, e?: StatsEvent) => {
     setStats(s);
+    setSeekValue(s.timestamp);
     const h = historyRef.current;
     if (e?.historyDelta) {
       historyIndexRef.current = clamp(
@@ -149,6 +167,13 @@ export default function App() {
       h.push({ fps: s.fps, ft: s.frameTime * 1000 });
       historyIndexRef.current = h.length - 1;
     }
+    drawHistoryCharts();
+  };
+
+  const resetAnalysisHistory = () => {
+    historyRef.current = [];
+    historyIndexRef.current = -1;
+    setStats(null);
     drawHistoryCharts();
   };
 
@@ -239,6 +264,21 @@ export default function App() {
             <StepForwardIcon />
           </button>
         </div>
+        <label className="seek-control">
+          シーク
+          <input
+            type="range"
+            min={0}
+            max={duration || 0}
+            step={0.001}
+            value={Math.min(seekValue, duration || 0)}
+            disabled={!running || duration <= 0}
+            onChange={(e) => seek(parseFloat(e.target.value))}
+          />
+          <span>
+            {formatTime(seekValue)} / {formatTime(duration)}
+          </span>
+        </label>
         {running && <span>{paused ? "一時停止中" : "再生中…"}</span>}
       </div>
 
@@ -334,6 +374,13 @@ function clearCanvas(c: HTMLCanvasElement | null) {
 function clamp(v: number, min: number, max: number) {
   if (max < min) return min;
   return Math.max(min, Math.min(max, v));
+}
+
+function formatTime(seconds: number) {
+  if (!Number.isFinite(seconds) || seconds <= 0) return "0:00.000";
+  const minutes = Math.floor(seconds / 60);
+  const rest = seconds - minutes * 60;
+  return `${minutes}:${rest.toFixed(3).padStart(6, "0")}`;
 }
 
 function drawChart(
