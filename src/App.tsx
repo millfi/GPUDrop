@@ -27,6 +27,7 @@ export default function App() {
   const [duration, setDuration] = useState(0);
   const [seekValue, setSeekValue] = useState(0);
   const [overlayVisible, setOverlayVisible] = useState(true);
+  const [seeking, setSeeking] = useState(false);
   const [stats, setStats] = useState<Stats | null>(null);
   const [events, setEvents] = useState<DupEvent[]>([]);
 
@@ -39,6 +40,7 @@ export default function App() {
   const playerRef = useRef<Player | null>(null);
   const historyRef = useRef<{ fps: number; ft: number }[]>([]);
   const historyIndexRef = useRef(-1);
+  const seekRequestIdRef = useRef(0);
 
   useEffect(() => {
     playerRef.current?.setThreshold(threshold);
@@ -70,6 +72,7 @@ export default function App() {
 
   const unload = (options: { resetFileInput?: boolean } = {}) => {
     const { resetFileInput = true } = options;
+    seekRequestIdRef.current++;
     playerRef.current?.stop();
     playerRef.current = null;
     historyRef.current = [];
@@ -79,6 +82,7 @@ export default function App() {
     setEvents([]);
     setDuration(0);
     setSeekValue(0);
+    setSeeking(false);
     setRunning(false);
     setPaused(false);
     // Reset the file input so re-selecting the same file fires onChange.
@@ -110,6 +114,8 @@ export default function App() {
     setStats(null);
     setDuration(0);
     setSeekValue(0);
+    seekRequestIdRef.current++;
+    setSeeking(false);
 
     const player = new Player({
       file,
@@ -126,6 +132,8 @@ export default function App() {
         });
       },
       onEnd: () => {
+        seekRequestIdRef.current++;
+        setSeeking(false);
         setRunning(false);
         setPaused(false);
       },
@@ -163,10 +171,32 @@ export default function App() {
   };
 
   const seek = (value: number) => {
-    setSeekValue(value);
+    startSeek(value, { clearEvents: true });
+  };
+
+  const seekToDuplicateEvent = (timestamp: number) => {
+    startSeek(timestamp);
+  };
+
+  const startSeek = (
+    timestamp: number,
+    options: { clearEvents?: boolean } = {},
+  ) => {
+    setSeekValue(timestamp);
     resetAnalysisHistory();
-    setEvents([]);
-    void playerRef.current?.seek(value).catch(console.error);
+    if (options.clearEvents) setEvents([]);
+
+    const player = playerRef.current;
+    if (!player) return;
+
+    const requestId = ++seekRequestIdRef.current;
+    setSeeking(true);
+    void player
+      .seek(timestamp)
+      .catch(console.error)
+      .finally(() => {
+        if (seekRequestIdRef.current === requestId) setSeeking(false);
+      });
   };
 
   const updateStats = (s: Stats, e?: StatsEvent) => {
@@ -267,6 +297,11 @@ export default function App() {
           <div>映像</div>
           <div ref={videoPanelRef} className="video-panel">
             <canvas ref={videoCanvas} />
+            {seeking && (
+              <div className="seek-loading" role="status" aria-label="シーク中">
+                <LoadingIcon />
+              </div>
+            )}
             <div
               className={`video-overlay${overlayVisible ? "" : " is-hidden"}`}
             >
@@ -340,14 +375,37 @@ export default function App() {
           <div>同一フレーム検知 ({events.length}件)</div>
           <div className="events">
             {events.map((e, i) => (
-              <div key={i}>
+              <button
+                key={`${e.frameNumber}-${e.timestamp}-${i}`}
+                type="button"
+                className="event-link"
+                onClick={() => seekToDuplicateEvent(e.timestamp)}
+                title={`${e.timestamp.toFixed(3)}s にシーク`}
+              >
                 t = {e.timestamp.toFixed(3)}s · frame #{e.frameNumber}
-              </div>
+              </button>
             ))}
           </div>
         </div>
       </div>
     </div>
+  );
+}
+
+function LoadingIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <circle
+        cx="12"
+        cy="12"
+        r="8"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="3"
+        strokeLinecap="round"
+        strokeDasharray="34 18"
+      />
+    </svg>
   );
 }
 

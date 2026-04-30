@@ -68,6 +68,15 @@ interface SnapshotCacheEntry {
   snapshot: FrameSnapshot;
 }
 
+interface QueuedSeek {
+  targetTime: number;
+  generation: number;
+}
+
+interface PendingSeek extends QueuedSeek {
+  resolve: () => void;
+}
+
 export class Player {
   private opts: Options;
   private analyzer: Analyzer | null = null;
@@ -89,7 +98,10 @@ export class Player {
   private pauseStarted = 0;
   private stepBudget = 0;
   private stepChain: Promise<void> = Promise.resolve();
-  private seekTargetTime: number | null = null;
+  private seekTarget: QueuedSeek | null = null;
+  private seekGeneration = 0;
+  private pendingSeek: PendingSeek | null = null;
+  private awaitingSeekGeneration: number | null = null;
   private activeFrameDone: Promise<void> | null = null;
   private resolveActiveFrameDone: (() => void) | null = null;
   private delayWaiters: (() => void)[] = [];
@@ -149,12 +161,15 @@ export class Player {
   seek(timestamp: number) {
     if (this.stopped || !this.sampleSink) return Promise.resolve();
 
-    const target = this.mediaStartTime + clamp(timestamp, 0, this.duration);
-    this.seekTargetTime = target;
-    if (this.paused) this.stepBudget = 1;
+    const targetTime = this.mediaStartTime + clamp(timestamp, 0, this.duration);
+    const generation = ++this.seekGeneration;
+    this.finishPendingSeek();
+    this.seekTarget = { targetTime, generation };
     this.resolvePauseWaiters();
     this.resolveDelayWaiters();
-    return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      this.pendingSeek = { targetTime, generation, resolve };
+    });
   }
 
   private async stepForwardImpl() {
@@ -275,7 +290,7 @@ export class Player {
         const seekTarget = this.takeSeekTarget();
         if (seekTarget !== null) {
           sample.close();
-          nextStartTime = seekTarget;
+          nextStartTime = seekTarget.targetTime;
           await this.resetAfterSeek(seekTarget);
           restart = true;
           break;
@@ -285,7 +300,7 @@ export class Player {
 
         const nextSeekTarget = this.takeSeekTarget();
         if (nextSeekTarget !== null) {
-          nextStartTime = nextSeekTarget;
+          nextStartTime = nextSeekTarget.targetTime;
           await this.resetAfterSeek(nextSeekTarget);
           restart = true;
           break;
@@ -308,7 +323,7 @@ export class Player {
       return;
     }
 
-    if (this.seekTargetTime !== null) {
+    if (this.hasSeekTarget()) {
       frame.close();
       return;
     }
@@ -327,7 +342,7 @@ export class Player {
       stepping = await this.waitForPlaybackPermission();
     }
 
-    if (this.stopped || this.seekTargetTime !== null) {
+    if (this.stopped || this.hasSeekTarget()) {
       frame.close();
       return;
     }
@@ -361,7 +376,7 @@ export class Player {
       const diffSnapshotImage = await createImageBitmap(this.opts.diffCanvas);
       frame.close();
 
-      if (this.seekTargetTime !== null) {
+      if (this.hasSeekTarget()) {
         snapshotImage.close();
         diffSnapshotImage.close();
         return;
@@ -410,6 +425,7 @@ export class Player {
         diffImage: diffSnapshotImage,
       });
       this.opts.onStats(stats);
+      this.finishRenderedSeek();
     } finally {
       finishActiveFrame();
     }
@@ -431,6 +447,9 @@ export class Player {
     this.input = null;
     this.sampleSink = null;
     this.analyzer?.destroy();
+    this.seekTarget = null;
+    this.awaitingSeekGeneration = null;
+    this.finishPendingSeek();
     this.clearSnapshotCache();
     this.resetHistoryState();
     this.opts.onEnd?.();
@@ -441,7 +460,7 @@ export class Player {
       this.paused &&
       this.stepBudget === 0 &&
       !this.stopped &&
-      this.seekTargetTime === null
+      !this.hasSeekTarget()
     ) {
       await new Promise<void>((resolve) => {
         this.pauseWaiters.push(resolve);
@@ -505,21 +524,51 @@ export class Player {
     waiters.forEach((resolve) => resolve());
   }
 
+  private hasSeekTarget() {
+    return this.seekTarget !== null;
+  }
+
   private takeSeekTarget() {
-    const target = this.seekTargetTime;
-    this.seekTargetTime = null;
+    const target = this.seekTarget;
+    this.seekTarget = null;
     return target;
   }
 
-  private async resetAfterSeek(targetTime: number) {
+  private async resetAfterSeek(seekTarget: QueuedSeek) {
     this.resetPlaybackClock();
     this.resetHistoryState();
     this.resetFpsState();
     await this.analyzer?.reset();
+    if (this.pendingSeek?.generation === seekTarget.generation) {
+      this.awaitingSeekGeneration = seekTarget.generation;
+    }
+    if (this.paused) {
+      this.pauseStarted = performance.now();
+      this.stepBudget = Math.max(this.stepBudget, 1);
+      this.resolvePauseWaiters();
+    }
     this.opts.onReady?.({
-      timestamp: clamp(targetTime - this.mediaStartTime, 0, this.duration),
+      timestamp: clamp(
+        seekTarget.targetTime - this.mediaStartTime,
+        0,
+        this.duration,
+      ),
       duration: this.duration,
     });
+  }
+
+  private finishRenderedSeek() {
+    const generation = this.awaitingSeekGeneration;
+    if (generation === null) return;
+    this.awaitingSeekGeneration = null;
+    if (this.pendingSeek?.generation === generation) this.finishPendingSeek();
+  }
+
+  private finishPendingSeek() {
+    const pending = this.pendingSeek;
+    if (!pending) return;
+    this.pendingSeek = null;
+    pending.resolve();
   }
 
   private resetPlaybackClock() {

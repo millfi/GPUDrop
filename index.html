@@ -96,6 +96,30 @@
                 opacity: 0;
                 pointer-events: none;
             }
+            .seek-loading {
+                position: absolute;
+                top: 8px;
+                right: 8px;
+                width: 32px;
+                height: 32px;
+                display: grid;
+                place-items: center;
+                color: #fff;
+                background: rgb(0 0 0 / 72%);
+                border: 1px solid rgb(255 255 255 / 16%);
+                box-sizing: border-box;
+                pointer-events: none;
+            }
+            .seek-loading svg {
+                width: 20px;
+                height: 20px;
+                animation: seek-spin 900ms linear infinite;
+            }
+            @keyframes seek-spin {
+                to {
+                    transform: rotate(360deg);
+                }
+            }
             .seek-control {
                 display: flex;
                 gap: 6px;
@@ -120,8 +144,17 @@
                     gap: 6px;
                     padding: 4px;
                 }
+                .seek-loading {
+                    top: 4px;
+                    right: 4px;
+                }
                 .seek-control span {
                     display: none;
+                }
+            }
+            @media (prefers-reduced-motion: reduce) {
+                .seek-loading svg {
+                    animation-duration: 1.8s;
                 }
             }
             .stats {
@@ -163,6 +196,22 @@
                 font-size: 12px;
                 border: 1px solid #333;
                 padding: 4px;
+            }
+            .event-link {
+                display: block;
+                width: 100%;
+                padding: 2px 4px;
+                border: 0;
+                background: transparent;
+                color: #9fd7ff;
+                font: inherit;
+                text-align: left;
+                cursor: pointer;
+            }
+            .event-link:hover,
+            .event-link:focus-visible {
+                background: #1e2a33;
+                text-decoration: underline;
             }
             @media (max-width: 1200px) {
                 .grid {
