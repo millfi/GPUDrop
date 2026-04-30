@@ -26,10 +26,12 @@ export default function App() {
   const [paused, setPaused] = useState(false);
   const [duration, setDuration] = useState(0);
   const [seekValue, setSeekValue] = useState(0);
+  const [overlayVisible, setOverlayVisible] = useState(true);
   const [stats, setStats] = useState<Stats | null>(null);
   const [events, setEvents] = useState<DupEvent[]>([]);
 
   const videoCanvas = useRef<HTMLCanvasElement>(null);
+  const videoPanelRef = useRef<HTMLDivElement>(null);
   const diffCanvas = useRef<HTMLCanvasElement>(null);
   const fpsCanvas = useRef<HTMLCanvasElement>(null);
   const ftCanvas = useRef<HTMLCanvasElement>(null);
@@ -49,6 +51,20 @@ export default function App() {
   useEffect(() => {
     return () => {
       playerRef.current?.stop();
+    };
+  }, []);
+
+  useEffect(() => {
+    const handlePointerDown = (e: PointerEvent) => {
+      if (e.button !== 0) return;
+      const videoPanel = videoPanelRef.current;
+      if (!videoPanel) return;
+      setOverlayVisible(videoPanel.contains(e.target as Node));
+    };
+
+    document.addEventListener("pointerdown", handlePointerDown);
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown);
     };
   }, []);
 
@@ -232,53 +248,6 @@ export default function App() {
         <button onClick={start} disabled={!file || running}>
           開始
         </button>
-        <div className="player-controls">
-          <button
-            type="button"
-            className="icon-button"
-            onClick={stepBackward}
-            disabled={!running}
-            title="1フレーム戻る"
-            aria-label="1フレーム戻る"
-          >
-            <StepBackIcon />
-          </button>
-          <button
-            type="button"
-            className="icon-button"
-            onClick={togglePlayback}
-            disabled={!running}
-            title={paused ? "再生" : "一時停止"}
-            aria-label={paused ? "再生" : "一時停止"}
-          >
-            {paused ? <PlayIcon /> : <PauseIcon />}
-          </button>
-          <button
-            type="button"
-            className="icon-button"
-            onClick={stepForward}
-            disabled={!running}
-            title="1フレーム進む"
-            aria-label="1フレーム進む"
-          >
-            <StepForwardIcon />
-          </button>
-        </div>
-        <label className="seek-control">
-          シーク
-          <input
-            type="range"
-            min={0}
-            max={duration || 0}
-            step={0.001}
-            value={Math.min(seekValue, duration || 0)}
-            disabled={!running || duration <= 0}
-            onChange={(e) => seek(parseFloat(e.target.value))}
-          />
-          <span>
-            {formatTime(seekValue)} / {formatTime(duration)}
-          </span>
-        </label>
         {running && <span>{paused ? "一時停止中" : "再生中…"}</span>}
       </div>
 
@@ -294,32 +263,88 @@ export default function App() {
       </div>
 
       <div className="grid">
-        <div>
+        <div className="media-column">
           <div>映像</div>
-          <canvas ref={videoCanvas} />
-        </div>
-        <div>
-          <div>差分</div>
-          <canvas ref={diffCanvas} />
-        </div>
-        <div>
-          <div>FPS (0–144)</div>
-          <canvas ref={fpsCanvas} width={600} height={150} />
-        </div>
-        <div>
-          <div>フレームタイム (ms, 0–100)</div>
-          <canvas ref={ftCanvas} width={600} height={150} />
-        </div>
-      </div>
-
-      <div>
-        <div>同一フレーム検知 ({events.length}件)</div>
-        <div className="events">
-          {events.map((e, i) => (
-            <div key={i}>
-              t = {e.timestamp.toFixed(3)}s · frame #{e.frameNumber}
+          <div ref={videoPanelRef} className="video-panel">
+            <canvas ref={videoCanvas} />
+            <div
+              className={`video-overlay${overlayVisible ? "" : " is-hidden"}`}
+            >
+              <div className="player-controls">
+                <button
+                  type="button"
+                  className="icon-button"
+                  onClick={stepBackward}
+                  disabled={!running}
+                  title="1フレーム戻る"
+                  aria-label="1フレーム戻る"
+                >
+                  <StepBackIcon />
+                </button>
+                <button
+                  type="button"
+                  className="icon-button"
+                  onClick={togglePlayback}
+                  disabled={!running}
+                  title={paused ? "再生" : "一時停止"}
+                  aria-label={paused ? "再生" : "一時停止"}
+                >
+                  {paused ? <PlayIcon /> : <PauseIcon />}
+                </button>
+                <button
+                  type="button"
+                  className="icon-button"
+                  onClick={stepForward}
+                  disabled={!running}
+                  title="1フレーム進む"
+                  aria-label="1フレーム進む"
+                >
+                  <StepForwardIcon />
+                </button>
+              </div>
+              <label className="seek-control">
+                <input
+                  type="range"
+                  min={0}
+                  max={duration || 0}
+                  step={0.001}
+                  value={Math.min(seekValue, duration || 0)}
+                  disabled={!running || duration <= 0}
+                  onChange={(e) => seek(parseFloat(e.target.value))}
+                  aria-label="シーク"
+                />
+                <span>
+                  {formatTime(seekValue)} / {formatTime(duration)}
+                </span>
+              </label>
             </div>
-          ))}
+          </div>
+          <div className="panel-block">
+            <div>差分</div>
+            <canvas ref={diffCanvas} />
+          </div>
+        </div>
+
+        <div className="charts-column">
+          <div>
+            <div>FPS (0–144)</div>
+            <canvas ref={fpsCanvas} width={600} height={150} />
+          </div>
+          <div>
+            <div>フレームタイム (ms, 0–100)</div>
+            <canvas ref={ftCanvas} width={600} height={150} />
+          </div>
+        </div>
+
+        <div className="events-column">
+          <div>同一フレーム検知 ({events.length}件)</div>
+          <div className="events">
+            {events.map((e, i) => (
+              <div key={i}>
+                t = {e.timestamp.toFixed(3)}s · frame #{e.frameNumber}
+              </div>
+            ))}
+          </div>
         </div>
       </div>
     </div>

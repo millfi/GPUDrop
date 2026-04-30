@@ -37,6 +37,7 @@
             .player-controls {
                 display: flex;
                 gap: 4px;
+                flex: 0 0 auto;
             }
             .icon-button {
                 width: 32px;
@@ -68,17 +69,60 @@
                 gap: 6px;
                 align-items: center;
             }
+            .video-panel {
+                position: relative;
+                display: inline-block;
+                max-width: 100%;
+                background: #000;
+            }
+            .video-overlay {
+                position: absolute;
+                left: 8px;
+                right: 8px;
+                bottom: 8px;
+                display: flex;
+                gap: 8px;
+                align-items: center;
+                padding: 6px;
+                background: rgb(0 0 0 / 72%);
+                border: 1px solid rgb(255 255 255 / 16%);
+                box-sizing: border-box;
+                transition:
+                    opacity 120ms ease,
+                    visibility 120ms ease;
+            }
+            .video-overlay.is-hidden {
+                visibility: hidden;
+                opacity: 0;
+                pointer-events: none;
+            }
             .seek-control {
+                display: flex;
+                gap: 6px;
+                align-items: center;
                 flex: 1 1 280px;
+                min-width: 0;
             }
             .seek-control input {
                 flex: 1;
-                min-width: 120px;
+                min-width: 0;
             }
             .seek-control span {
                 font-family: ui-monospace, monospace;
                 font-size: 12px;
                 white-space: nowrap;
+            }
+            @media (max-width: 700px) {
+                .video-overlay {
+                    left: 4px;
+                    right: 4px;
+                    bottom: 4px;
+                    gap: 6px;
+                    padding: 4px;
+                }
+                .seek-control span {
+                    display: none;
+                }
             }
             .stats {
                 font-family: ui-monospace, monospace;
@@ -87,17 +131,54 @@
             }
             .grid {
                 display: grid;
-                grid-template-columns: 1fr 1fr;
-                gap: 8px;
+                grid-template-columns: minmax(280px, 1fr) 600px minmax(
+                        220px,
+                        0.65fr
+                    );
+                align-items: start;
+                gap: 12px;
                 margin-bottom: 8px;
             }
+            .media-column,
+            .charts-column,
+            .events-column {
+                min-width: 0;
+            }
+            .charts-column {
+                display: grid;
+                gap: 8px;
+            }
+            .panel-block {
+                margin-top: 8px;
+            }
+            .events-column {
+                display: grid;
+                grid-template-rows: auto 1fr;
+                align-self: stretch;
+            }
             .events {
-                max-height: 200px;
+                max-height: 332px;
                 overflow: auto;
                 font-family: ui-monospace, monospace;
                 font-size: 12px;
                 border: 1px solid #333;
                 padding: 4px;
+            }
+            @media (max-width: 1200px) {
+                .grid {
+                    grid-template-columns: 1fr 1fr;
+                }
+                .events-column {
+                    grid-column: 2;
+                }
+            }
+            @media (max-width: 800px) {
+                .grid {
+                    grid-template-columns: 1fr;
+                }
+                .events-column {
+                    grid-column: auto;
+                }
             }
         </style>
     </head>
