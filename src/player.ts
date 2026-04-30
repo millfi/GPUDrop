@@ -17,6 +17,7 @@ import {
 import { Analyzer } from "./analyzer";
 
 const FRAME_SNAPSHOT_CACHE_SIZE = 120;
+const PREVIOUS_SAMPLE_EPSILON = 1e-9;
 
 export interface Stats {
   fps: number;
@@ -32,6 +33,7 @@ export interface DupEvent {
 
 export interface StatsEvent {
   historyDelta?: number;
+  resetHistory?: boolean;
 }
 
 export interface SeekInfo {
@@ -102,6 +104,7 @@ export class Player {
   private seekGeneration = 0;
   private pendingSeek: PendingSeek | null = null;
   private awaitingSeekGeneration: number | null = null;
+  private resetStatsHistoryOnNextFrame = false;
   private activeFrameDone: Promise<void> | null = null;
   private resolveActiveFrameDone: (() => void) | null = null;
   private delayWaiters: (() => void)[] = [];
@@ -194,14 +197,26 @@ export class Player {
   }
 
   private async stepBackwardImpl() {
-    if (this.stopped || this.frameRecords.length < 2) return;
+    if (this.stopped) return;
     if (!this.paused) this.pause();
     await this.waitForActiveFrame();
     if (this.stopped) return;
     if (this.historyIndex < 0) this.historyIndex = this.frameRecords.length - 1;
-    if (this.historyIndex === 0) return;
-    this.historyIndex--;
-    await this.renderRecord(this.historyIndex, -1);
+    if (this.historyIndex > 0) {
+      this.historyIndex--;
+      await this.renderRecord(this.historyIndex, -1);
+      return;
+    }
+
+    const currentRecord = this.frameRecords[this.historyIndex];
+    if (!currentRecord) return;
+
+    const previousTimestamp = await this.getPreviousSampleTimestamp(
+      currentRecord.sampleTimestamp,
+    );
+    if (previousTimestamp === null) return;
+
+    await this.seek(previousTimestamp - this.mediaStartTime);
   }
 
   async start() {
@@ -334,7 +349,8 @@ export class Player {
     }
 
     const tSec = frame.timestamp / 1_000_000 - this.mediaStartTime;
-    const target = this.startWall + (frame.timestamp - this.playbackBaseTs) / 1000;
+    const target =
+      this.startWall + (frame.timestamp - this.playbackBaseTs) / 1000;
     const delay = target - performance.now();
     if (!stepping && delay > 0) await this.waitForDelay(delay);
 
@@ -424,7 +440,8 @@ export class Player {
         image: snapshotImage,
         diffImage: diffSnapshotImage,
       });
-      this.opts.onStats(stats);
+      const statsEvent = this.consumeStatsEvent();
+      this.opts.onStats(stats, statsEvent);
       this.finishRenderedSeek();
     } finally {
       finishActiveFrame();
@@ -449,6 +466,7 @@ export class Player {
     this.analyzer?.destroy();
     this.seekTarget = null;
     this.awaitingSeekGeneration = null;
+    this.resetStatsHistoryOnNextFrame = false;
     this.finishPendingSeek();
     this.clearSnapshotCache();
     this.resetHistoryState();
@@ -538,6 +556,7 @@ export class Player {
     this.resetPlaybackClock();
     this.resetHistoryState();
     this.resetFpsState();
+    this.resetStatsHistoryOnNextFrame = true;
     await this.analyzer?.reset();
     if (this.pendingSeek?.generation === seekTarget.generation) {
       this.awaitingSeekGeneration = seekTarget.generation;
@@ -569,6 +588,12 @@ export class Player {
     if (!pending) return;
     this.pendingSeek = null;
     pending.resolve();
+  }
+
+  private consumeStatsEvent(): StatsEvent | undefined {
+    if (!this.resetStatsHistoryOnNextFrame) return undefined;
+    this.resetStatsHistoryOnNextFrame = false;
+    return { resetHistory: true };
   }
 
   private resetPlaybackClock() {
@@ -681,6 +706,23 @@ export class Player {
       return await createImageBitmap(frame as unknown as ImageBitmapSource);
     } finally {
       frame.close();
+      sample.close();
+    }
+  }
+
+  private async getPreviousSampleTimestamp(beforeTimestamp: number) {
+    const sink = this.sampleSink;
+    if (!sink) return null;
+
+    const sample = await sink.getSample(
+      beforeTimestamp - PREVIOUS_SAMPLE_EPSILON,
+    );
+    if (!sample) return null;
+
+    try {
+      if (sample.timestamp >= beforeTimestamp) return null;
+      return sample.timestamp;
+    } finally {
       sample.close();
     }
   }

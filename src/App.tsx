@@ -203,6 +203,10 @@ export default function App() {
     setStats(s);
     setSeekValue(s.timestamp);
     const h = historyRef.current;
+    if (e?.resetHistory) {
+      h.length = 0;
+      historyIndexRef.current = -1;
+    }
     if (e?.historyDelta) {
       historyIndexRef.current = clamp(
         historyIndexRef.current + e.historyDelta,
