@@ -179,8 +179,8 @@ export class Analyzer {
     return this.enqueueWork(() => this.compareImpl(frame, threshold));
   }
 
-  async renderDiffImage(image: ImageBitmap) {
-    await this.enqueueWork(() => this.renderDiffImageImpl(image));
+  async prime(frame: VideoFrame) {
+    await this.enqueueWork(() => this.primeImpl(frame));
   }
 
   async renderDiffBetween(
@@ -250,6 +250,15 @@ export class Analyzer {
     return { diffCount: count, isFirst: false };
   }
 
+  private async primeImpl(frame: VideoFrame) {
+    this.device.queue.copyExternalImageToTexture(
+      { source: frame as unknown as ImageBitmap },
+      { texture: this.prevTex },
+      [this.w, this.h],
+    );
+    this.hasPrev = true;
+  }
+
   private async computeAndRenderDiff(
     prevTex: GPUTexture,
     currTex: GPUTexture,
@@ -297,19 +306,6 @@ export class Analyzer {
     const count = new Uint32Array(this.readBuf.getMappedRange().slice(0))[0];
     this.readBuf.unmap();
     return count;
-  }
-
-  private async renderDiffImageImpl(image: ImageBitmap) {
-    this.device.queue.copyExternalImageToTexture(
-      { source: image },
-      { texture: this.diffTex },
-      [this.w, this.h],
-    );
-
-    const enc = this.device.createCommandEncoder();
-    this.encodeDiffRender(enc);
-    this.device.queue.submit([enc.finish()]);
-    await this.device.queue.onSubmittedWorkDone();
   }
 
   private async renderBlankDiffImpl() {

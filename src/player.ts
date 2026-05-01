@@ -56,7 +56,6 @@ interface Options {
 
 interface FrameSnapshot {
   image: ImageBitmap;
-  diffImage: ImageBitmap;
 }
 
 interface FrameRecord {
@@ -73,9 +72,14 @@ interface SnapshotCacheEntry {
 interface QueuedSeek {
   targetTime: number;
   generation: number;
+  startTime: number;
+  prerollUntilTime: number | null;
+  stepFrames: number;
 }
 
-interface PendingSeek extends QueuedSeek {
+interface PendingSeek {
+  targetTime: number;
+  generation: number;
   resolve: () => void;
 }
 
@@ -105,6 +109,7 @@ export class Player {
   private pendingSeek: PendingSeek | null = null;
   private awaitingSeekGeneration: number | null = null;
   private resetStatsHistoryOnNextFrame = false;
+  private prerollUntilTime: number | null = null;
   private activeFrameDone: Promise<void> | null = null;
   private resolveActiveFrameDone: (() => void) | null = null;
   private delayWaiters: (() => void)[] = [];
@@ -165,9 +170,27 @@ export class Player {
     if (this.stopped || !this.sampleSink) return Promise.resolve();
 
     const targetTime = this.mediaStartTime + clamp(timestamp, 0, this.duration);
+    return this.queueSeek(targetTime);
+  }
+
+  private queueSeek(
+    targetTime: number,
+    options: {
+      startTime?: number;
+      prerollUntilTime?: number | null;
+      stepFrames?: number;
+    } = {},
+  ) {
     const generation = ++this.seekGeneration;
+    const seekTarget = {
+      targetTime,
+      generation,
+      startTime: options.startTime ?? targetTime,
+      prerollUntilTime: options.prerollUntilTime ?? null,
+      stepFrames: options.stepFrames ?? 1,
+    };
     this.finishPendingSeek();
-    this.seekTarget = { targetTime, generation };
+    this.seekTarget = seekTarget;
     this.resolvePauseWaiters();
     this.resolveDelayWaiters();
     return new Promise<void>((resolve) => {
@@ -216,7 +239,14 @@ export class Player {
     );
     if (previousTimestamp === null) return;
 
-    await this.seek(previousTimestamp - this.mediaStartTime);
+    const prerollTimestamp =
+      await this.getPreviousSampleTimestamp(previousTimestamp);
+    await this.queueSeek(previousTimestamp, {
+      startTime: prerollTimestamp ?? previousTimestamp,
+      prerollUntilTime:
+        prerollTimestamp === null ? null : previousTimestamp,
+      stepFrames: prerollTimestamp === null ? 1 : 2,
+    });
   }
 
   async start() {
@@ -305,7 +335,7 @@ export class Player {
         const seekTarget = this.takeSeekTarget();
         if (seekTarget !== null) {
           sample.close();
-          nextStartTime = seekTarget.targetTime;
+          nextStartTime = seekTarget.startTime;
           await this.resetAfterSeek(seekTarget);
           restart = true;
           break;
@@ -315,7 +345,7 @@ export class Player {
 
         const nextSeekTarget = this.takeSeekTarget();
         if (nextSeekTarget !== null) {
-          nextStartTime = nextSeekTarget.targetTime;
+          nextStartTime = nextSeekTarget.startTime;
           await this.resetAfterSeek(nextSeekTarget);
           restart = true;
           break;
@@ -365,6 +395,14 @@ export class Player {
 
     const finishActiveFrame = this.beginActiveFrame();
     try {
+      if (this.consumePrerollFrame(sampleTimestamp)) {
+        this.frameNumber++;
+        await this.analyzer?.prime(frame);
+        frame.close();
+        this.updateFpsState(tSec, 0, true, false);
+        return;
+      }
+
       // 1. Display
       if (this.vctx) {
         this.vctx.drawImage(
@@ -389,47 +427,14 @@ export class Player {
         diffCount = r.diffCount;
         isFirst = r.isFirst;
       }
-      const diffSnapshotImage = await createImageBitmap(this.opts.diffCanvas);
       frame.close();
 
       if (this.hasSeekTarget()) {
         snapshotImage.close();
-        diffSnapshotImage.close();
         return;
       }
 
-      // 3. FPS / duplicate logic.
-      // frameTime updates on unique frames. fps is the number of unique frames
-      // observed in the rolling 1-second window ending at this frame.
-      if (isFirst) {
-        this.prevUniqueT = tSec;
-        this.uniqueTs.push(tSec);
-      } else {
-        const ratio = this.totalPixels > 0 ? diffCount / this.totalPixels : 0;
-        if (ratio <= this.frameThreshold) {
-          this.opts.onDuplicate({
-            timestamp: tSec,
-            frameNumber: this.frameNumber,
-          });
-        } else {
-          this.lastFt = tSec - this.prevUniqueT;
-          this.prevUniqueT = tSec;
-          this.uniqueTs.push(tSec);
-        }
-      }
-      while (this.uniqueTs.length > 0 && this.uniqueTs[0] <= tSec - 1) {
-        this.uniqueTs.shift();
-      }
-
-      const frameTime = this.lastFt; // seconds
-      const fps = this.uniqueTs.length;
-
-      const stats = {
-        fps,
-        frameTime,
-        timestamp: tSec,
-        frameNumber: this.frameNumber,
-      };
+      const stats = this.updateFpsState(tSec, diffCount, isFirst, true);
 
       const recordIndex = this.pushRecord({
         sampleTimestamp,
@@ -438,7 +443,6 @@ export class Player {
       });
       this.cacheSnapshot(recordIndex, {
         image: snapshotImage,
-        diffImage: diffSnapshotImage,
       });
       const statsEvent = this.consumeStatsEvent();
       this.opts.onStats(stats, statsEvent);
@@ -467,6 +471,7 @@ export class Player {
     this.seekTarget = null;
     this.awaitingSeekGeneration = null;
     this.resetStatsHistoryOnNextFrame = false;
+    this.prerollUntilTime = null;
     this.finishPendingSeek();
     this.clearSnapshotCache();
     this.resetHistoryState();
@@ -557,13 +562,14 @@ export class Player {
     this.resetHistoryState();
     this.resetFpsState();
     this.resetStatsHistoryOnNextFrame = true;
+    this.prerollUntilTime = seekTarget.prerollUntilTime;
     await this.analyzer?.reset();
     if (this.pendingSeek?.generation === seekTarget.generation) {
       this.awaitingSeekGeneration = seekTarget.generation;
     }
     if (this.paused) {
       this.pauseStarted = performance.now();
-      this.stepBudget = Math.max(this.stepBudget, 1);
+      this.stepBudget = Math.max(this.stepBudget, seekTarget.stepFrames);
       this.resolvePauseWaiters();
     }
     this.opts.onReady?.({
@@ -594,6 +600,54 @@ export class Player {
     if (!this.resetStatsHistoryOnNextFrame) return undefined;
     this.resetStatsHistoryOnNextFrame = false;
     return { resetHistory: true };
+  }
+
+  private consumePrerollFrame(sampleTimestamp: number) {
+    const prerollUntilTime = this.prerollUntilTime;
+    if (prerollUntilTime === null) return false;
+    if (sampleTimestamp + PREVIOUS_SAMPLE_EPSILON < prerollUntilTime) {
+      return true;
+    }
+    this.prerollUntilTime = null;
+    return false;
+  }
+
+  private updateFpsState(
+    tSec: number,
+    diffCount: number,
+    isFirst: boolean,
+    notifyDuplicate: boolean,
+  ): Stats {
+    // frameTime updates on unique frames. fps is the number of unique frames
+    // observed in the rolling 1-second window ending at this frame.
+    if (isFirst) {
+      this.prevUniqueT = tSec;
+      this.uniqueTs.push(tSec);
+    } else {
+      const ratio = this.totalPixels > 0 ? diffCount / this.totalPixels : 0;
+      if (ratio <= this.frameThreshold) {
+        if (notifyDuplicate) {
+          this.opts.onDuplicate({
+            timestamp: tSec,
+            frameNumber: this.frameNumber,
+          });
+        }
+      } else {
+        this.lastFt = tSec - this.prevUniqueT;
+        this.prevUniqueT = tSec;
+        this.uniqueTs.push(tSec);
+      }
+    }
+    while (this.uniqueTs.length > 0 && this.uniqueTs[0] <= tSec - 1) {
+      this.uniqueTs.shift();
+    }
+
+    return {
+      fps: this.uniqueTs.length,
+      frameTime: this.lastFt,
+      timestamp: tSec,
+      frameNumber: this.frameNumber,
+    };
   }
 
   private resetPlaybackClock() {
@@ -635,7 +689,7 @@ export class Player {
         this.opts.videoCanvas.height,
       );
     }
-    await this.analyzer?.renderDiffImage(snapshot.diffImage);
+    await this.renderRecordDiff(recordIndex, snapshot);
     if (this.stopped) return;
     this.opts.onStats(record.stats, { historyDelta });
   }
@@ -649,41 +703,42 @@ export class Player {
       throw new Error(`フレーム履歴が見つかりません: ${recordIndex}`);
 
     const image = await this.decodeFrameImage(recordIndex);
+    const snapshot = { image };
+    this.cacheSnapshot(recordIndex, snapshot);
+    return snapshot;
+  }
+
+  private async renderRecordDiff(
+    recordIndex: number,
+    snapshot: FrameSnapshot,
+  ) {
+    const record = this.frameRecords[recordIndex];
+    if (!record) return;
+
+    if (recordIndex === 0) {
+      await this.analyzer?.renderBlankDiff();
+      return;
+    }
+
+    const prevSnapshot = this.snapshotMap.get(recordIndex - 1);
+    if (prevSnapshot) {
+      await this.analyzer?.renderDiffBetween(
+        prevSnapshot.image,
+        snapshot.image,
+        record.diffThreshold,
+      );
+      return;
+    }
+
+    const prevImage = await this.decodeFrameImage(recordIndex - 1);
     try {
-      let diffImage: ImageBitmap;
-
-      if (recordIndex === 0) {
-        diffImage = await this.createBlankDiffImage();
-      } else {
-        const prevSnapshot = this.snapshotMap.get(recordIndex - 1);
-        if (prevSnapshot) {
-          await this.analyzer?.renderDiffBetween(
-            prevSnapshot.image,
-            image,
-            record.diffThreshold,
-          );
-          diffImage = await createImageBitmap(this.opts.diffCanvas);
-        } else {
-          const prevImage = await this.decodeFrameImage(recordIndex - 1);
-          try {
-            await this.analyzer?.renderDiffBetween(
-              prevImage,
-              image,
-              record.diffThreshold,
-            );
-            diffImage = await createImageBitmap(this.opts.diffCanvas);
-          } finally {
-            prevImage.close();
-          }
-        }
-      }
-
-      const snapshot = { image, diffImage };
-      this.cacheSnapshot(recordIndex, snapshot);
-      return snapshot;
-    } catch (e) {
-      image.close();
-      throw e;
+      await this.analyzer?.renderDiffBetween(
+        prevImage,
+        snapshot.image,
+        record.diffThreshold,
+      );
+    } finally {
+      prevImage.close();
     }
   }
 
@@ -727,19 +782,6 @@ export class Player {
     }
   }
 
-  private async createBlankDiffImage() {
-    const canvas = new OffscreenCanvas(
-      this.opts.diffCanvas.width,
-      this.opts.diffCanvas.height,
-    );
-    const ctx = canvas.getContext("2d");
-    if (ctx) {
-      ctx.fillStyle = "#000";
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
-    }
-    return createImageBitmap(canvas);
-  }
-
   private cacheSnapshot(recordIndex: number, snapshot: FrameSnapshot) {
     const existing = this.snapshotSlots[this.nextSnapshotSlot];
     if (existing) {
@@ -764,7 +806,6 @@ export class Player {
 
   private closeSnapshot(snapshot: FrameSnapshot) {
     snapshot.image.close();
-    snapshot.diffImage.close();
   }
 
   private enqueueStep(action: () => Promise<void>) {
