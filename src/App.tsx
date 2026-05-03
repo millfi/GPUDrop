@@ -1,8 +1,15 @@
 import { useEffect, useRef, useState, type ChangeEvent } from "react";
+import {
+  ExportCanceledError,
+  exportOverlayVideo,
+  type ExportProgress,
+} from "./exporter";
 import { Player, type Stats, type DupEvent, type StatsEvent } from "./player";
 
 const HISTORY_CAP = 600;
 const EVENTS_CAP = 100;
+const FPS_AXIS_LIMITS = { min: 0, max: 240 };
+const FT_AXIS_LIMITS = { min: 0, max: 200 };
 const ACCEPTED_MEDIA_TYPES = [
   "video/*",
   ".mp4",
@@ -18,6 +25,11 @@ const ACCEPTED_MEDIA_TYPES = [
   ".m3u8",
 ].join(",");
 
+interface AxisRange {
+  min: number;
+  max: number;
+}
+
 export default function App() {
   const [file, setFile] = useState<File | null>(null);
   const [threshold, setThreshold] = useState(0.05);
@@ -28,8 +40,15 @@ export default function App() {
   const [seekValue, setSeekValue] = useState(0);
   const [overlayVisible, setOverlayVisible] = useState(true);
   const [seeking, setSeeking] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [exportProgress, setExportProgress] = useState<ExportProgress | null>(
+    null,
+  );
+  const [exportMessage, setExportMessage] = useState("");
   const [stats, setStats] = useState<Stats | null>(null);
   const [events, setEvents] = useState<DupEvent[]>([]);
+  const [fpsRange, setFpsRange] = useState<AxisRange>({ min: 0, max: 144 });
+  const [ftRange, setFtRange] = useState<AxisRange>({ min: 0, max: 100 });
 
   const videoCanvas = useRef<HTMLCanvasElement>(null);
   const videoPanelRef = useRef<HTMLDivElement>(null);
@@ -40,7 +59,10 @@ export default function App() {
   const playerRef = useRef<Player | null>(null);
   const historyRef = useRef<{ fps: number; ft: number }[]>([]);
   const historyIndexRef = useRef(-1);
+  const fpsRangeRef = useRef(fpsRange);
+  const ftRangeRef = useRef(ftRange);
   const seekRequestIdRef = useRef(0);
+  const exportAbortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     playerRef.current?.setThreshold(threshold);
@@ -52,9 +74,16 @@ export default function App() {
 
   useEffect(() => {
     return () => {
+      exportAbortRef.current?.abort();
       playerRef.current?.stop();
     };
   }, []);
+
+  useEffect(() => {
+    fpsRangeRef.current = normalizeAxisRange(fpsRange, FPS_AXIS_LIMITS);
+    ftRangeRef.current = normalizeAxisRange(ftRange, FT_AXIS_LIMITS);
+    drawHistoryCharts();
+  }, [fpsRange, ftRange]);
 
   useEffect(() => {
     const handlePointerDown = (e: PointerEvent) => {
@@ -72,6 +101,8 @@ export default function App() {
 
   const unload = (options: { resetFileInput?: boolean } = {}) => {
     const { resetFileInput = true } = options;
+    exportAbortRef.current?.abort();
+    exportAbortRef.current = null;
     seekRequestIdRef.current++;
     playerRef.current?.stop();
     playerRef.current = null;
@@ -85,12 +116,14 @@ export default function App() {
     setSeeking(false);
     setRunning(false);
     setPaused(false);
+    setExporting(false);
+    setExportProgress(null);
+    setExportMessage("");
     // Reset the file input so re-selecting the same file fires onChange.
     if (resetFileInput && fileInputRef.current) fileInputRef.current.value = "";
     clearCanvas(videoCanvas.current);
     clearCanvas(diffCanvas.current);
-    clearCanvas(fpsCanvas.current);
-    clearCanvas(ftCanvas.current);
+    drawHistoryCharts();
   };
 
   const handleFileChange = (e: ChangeEvent<HTMLInputElement>) => {
@@ -106,7 +139,7 @@ export default function App() {
   };
 
   const start = async () => {
-    if (!file) return;
+    if (!file || exporting) return;
     playerRef.current?.stop();
     historyRef.current = [];
     historyIndexRef.current = -1;
@@ -116,6 +149,7 @@ export default function App() {
     setSeekValue(0);
     seekRequestIdRef.current++;
     setSeeking(false);
+    drawHistoryCharts();
 
     const player = new Player({
       file,
@@ -124,13 +158,7 @@ export default function App() {
       threshold,
       frameThreshold,
       onStats: updateStats,
-      onDuplicate: (e) => {
-        setEvents((prev) => {
-          const next = [e, ...prev];
-          if (next.length > EVENTS_CAP) next.length = EVENTS_CAP;
-          return next;
-        });
-      },
+      onDuplicate: recordDuplicateEvent,
       onEnd: () => {
         seekRequestIdRef.current++;
         setSeeking(false);
@@ -157,24 +185,28 @@ export default function App() {
   };
 
   const togglePlayback = () => {
-    if (!playerRef.current) return;
+    if (!playerRef.current || exporting) return;
     if (paused) playerRef.current.resume();
     else playerRef.current.pause();
   };
 
   const stepBackward = () => {
+    if (exporting) return;
     void playerRef.current?.stepBackward().catch(console.error);
   };
 
   const stepForward = () => {
+    if (exporting) return;
     void playerRef.current?.stepForward().catch(console.error);
   };
 
   const seek = (value: number) => {
+    if (exporting) return;
     startSeek(value, { clearEvents: true });
   };
 
   const seekToDuplicateEvent = (timestamp: number) => {
+    if (exporting) return;
     startSeek(timestamp);
   };
 
@@ -196,7 +228,77 @@ export default function App() {
       .catch(console.error)
       .finally(() => {
         if (seekRequestIdRef.current === requestId) setSeeking(false);
+    });
+  };
+
+  const startExport = async () => {
+    if (!file || exporting || running) return;
+
+    playerRef.current?.stop();
+    playerRef.current = null;
+    historyRef.current = [];
+    historyIndexRef.current = -1;
+    setEvents([]);
+    setStats(null);
+    setDuration(0);
+    setSeekValue(0);
+    setSeeking(false);
+    setRunning(false);
+    setPaused(false);
+    setExportMessage("");
+    drawHistoryCharts();
+
+    const abortController = new AbortController();
+    exportAbortRef.current = abortController;
+    setExporting(true);
+    setExportProgress(null);
+    let lastExportProgress: ExportProgress | null = null;
+
+    try {
+      await exportOverlayVideo({
+        file,
+        videoCanvas: videoCanvas.current!,
+        diffCanvas: diffCanvas.current!,
+        threshold,
+        frameThreshold,
+        fpsRange: fpsRangeRef.current,
+        ftRange: ftRangeRef.current,
+        signal: abortController.signal,
+        onStats: updateStats,
+        onDuplicate: recordDuplicateEvent,
+        onProgress: (progress) => {
+          lastExportProgress = progress;
+          setExportProgress(progress);
+        },
       });
+      setExportMessage(
+        `書き出し完了${lastExportProgress?.codecLabel ? ` (${lastExportProgress.codecLabel})` : ""}`,
+      );
+    } catch (e) {
+      if (e instanceof ExportCanceledError || isAbortError(e)) {
+        setExportMessage("書き出し中断");
+      } else {
+        console.error(e);
+        alert((e as Error).message);
+      }
+    } finally {
+      if (exportAbortRef.current === abortController) {
+        exportAbortRef.current = null;
+      }
+      setExporting(false);
+    }
+  };
+
+  const cancelExport = () => {
+    exportAbortRef.current?.abort();
+  };
+
+  const recordDuplicateEvent = (e: DupEvent) => {
+    setEvents((prev) => {
+      const next = [e, ...prev];
+      if (next.length > EVENTS_CAP) next.length = EVENTS_CAP;
+      return next;
+    });
   };
 
   const updateStats = (s: Stats, e?: StatsEvent) => {
@@ -227,34 +329,34 @@ export default function App() {
     drawHistoryCharts();
   };
 
-  const drawHistoryCharts = () => {
+  function drawHistoryCharts() {
     const end = historyIndexRef.current + 1;
     const start = Math.max(0, end - HISTORY_CAP);
     const visibleHistory = historyRef.current.slice(start, end);
     drawChart(
       fpsCanvas.current,
       visibleHistory.map((x) => x.fps),
-      0,
-      144,
-      "#0f0",
+      fpsRangeRef.current,
+      "#159447",
     );
     drawChart(
       ftCanvas.current,
       visibleHistory.map((x) => x.ft),
-      0,
-      100,
-      "#0cf",
+      ftRangeRef.current,
+      "#0b8fb8",
     );
-  };
+  }
 
   return (
     <div>
+      <GlassFilterDefs />
       <h1>FPS推定</h1>
       <div className="controls">
         <input
           ref={fileInputRef}
           type="file"
           accept={ACCEPTED_MEDIA_TYPES}
+          disabled={exporting}
           onChange={handleFileChange}
         />
         <label>
@@ -265,6 +367,7 @@ export default function App() {
             max={0.5}
             step={0.001}
             value={threshold}
+            disabled={exporting}
             onChange={(e) => setThreshold(parseFloat(e.target.value))}
           />
         </label>
@@ -276,13 +379,19 @@ export default function App() {
             max={0.1}
             step={0.0001}
             value={frameThreshold}
+            disabled={exporting}
             onChange={(e) => setFrameThreshold(parseFloat(e.target.value))}
           />
         </label>
-        <button onClick={start} disabled={!file || running}>
+        <button onClick={start} disabled={!file || running || exporting}>
           開始
         </button>
+        <button onClick={startExport} disabled={!file || running || exporting}>
+          Export
+        </button>
+        {exporting && <button onClick={cancelExport}>中断</button>}
         {running && <span>{paused ? "一時停止中" : "再生中…"}</span>}
+        {exporting && <span>書き出し中…</span>}
       </div>
 
       <div className="stats">
@@ -295,6 +404,13 @@ export default function App() {
           ? `現在値: fps=${stats.fps}  frameTime=${(stats.frameTime * 1000).toFixed(2)}ms`
           : "現在値: —"}
       </div>
+      {(exporting || exportMessage) && (
+        <div className="stats">
+          {exporting && exportProgress
+            ? `export ${Math.round(exportProgress.progress * 100)}%  ${formatTime(exportProgress.timestamp)} / ${formatTime(exportProgress.duration)}  ${exportProgress.codecLabel}`
+            : exportMessage}
+        </div>
+      )}
 
       <div className="grid">
         <div className="media-column">
@@ -314,7 +430,7 @@ export default function App() {
                   type="button"
                   className="icon-button"
                   onClick={stepBackward}
-                  disabled={!running}
+                  disabled={!running || exporting}
                   title="1フレーム戻る"
                   aria-label="1フレーム戻る"
                 >
@@ -324,7 +440,7 @@ export default function App() {
                   type="button"
                   className="icon-button"
                   onClick={togglePlayback}
-                  disabled={!running}
+                  disabled={!running || exporting}
                   title={paused ? "再生" : "一時停止"}
                   aria-label={paused ? "再生" : "一時停止"}
                 >
@@ -334,7 +450,7 @@ export default function App() {
                   type="button"
                   className="icon-button"
                   onClick={stepForward}
-                  disabled={!running}
+                  disabled={!running || exporting}
                   title="1フレーム進む"
                   aria-label="1フレーム進む"
                 >
@@ -348,7 +464,7 @@ export default function App() {
                   max={duration || 0}
                   step={0.001}
                   value={Math.min(seekValue, duration || 0)}
-                  disabled={!running || duration <= 0}
+                  disabled={!running || exporting || duration <= 0}
                   onChange={(e) => seek(parseFloat(e.target.value))}
                   aria-label="シーク"
                 />
@@ -365,13 +481,43 @@ export default function App() {
         </div>
 
         <div className="charts-column">
-          <div>
-            <div>FPS (0–144)</div>
-            <canvas ref={fpsCanvas} width={600} height={150} />
+          <div className="chart-panel">
+            <div className="chart-title">
+              FPS ({fpsRange.min}–{fpsRange.max})
+            </div>
+            <canvas
+              ref={fpsCanvas}
+              className="chart-canvas"
+              width={600}
+              height={150}
+            />
+            <AxisRangeControl
+              title="FPS 縦軸レンジ"
+              description="このグラフの左軸に表示する値の範囲"
+              value={fpsRange}
+              limits={FPS_AXIS_LIMITS}
+              step={1}
+              onChange={setFpsRange}
+            />
           </div>
-          <div>
-            <div>フレームタイム (ms, 0–100)</div>
-            <canvas ref={ftCanvas} width={600} height={150} />
+          <div className="chart-panel">
+            <div className="chart-title">
+              フレームタイム (ms, {ftRange.min}–{ftRange.max})
+            </div>
+            <canvas
+              ref={ftCanvas}
+              className="chart-canvas"
+              width={600}
+              height={150}
+            />
+            <AxisRangeControl
+              title="フレームタイム 縦軸レンジ"
+              description="このグラフの左軸に表示する値の範囲"
+              value={ftRange}
+              limits={FT_AXIS_LIMITS}
+              step={1}
+              onChange={setFtRange}
+            />
           </div>
         </div>
 
@@ -383,6 +529,7 @@ export default function App() {
                 key={`${e.frameNumber}-${e.timestamp}-${i}`}
                 type="button"
                 className="event-link"
+                disabled={exporting}
                 onClick={() => seekToDuplicateEvent(e.timestamp)}
                 title={`${e.timestamp.toFixed(3)}s にシーク`}
               >
@@ -390,6 +537,137 @@ export default function App() {
               </button>
             ))}
           </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function GlassFilterDefs() {
+  return (
+    <svg
+      width="0"
+      height="0"
+      aria-hidden="true"
+      focusable="false"
+      style={{ position: "absolute" }}
+    >
+      <filter
+        id="gpudrop-glass-distortion"
+        x="0%"
+        y="0%"
+        width="100%"
+        height="100%"
+        filterUnits="objectBoundingBox"
+      >
+        <feTurbulence
+          type="fractalNoise"
+          baseFrequency="0.001 0.005"
+          numOctaves="1"
+          seed="17"
+          result="turbulence"
+        />
+        <feComponentTransfer in="turbulence" result="mapped">
+          <feFuncR type="gamma" amplitude="1" exponent="10" offset="0.5" />
+          <feFuncG type="gamma" amplitude="0" exponent="1" offset="0" />
+          <feFuncB type="gamma" amplitude="0" exponent="1" offset="0.5" />
+        </feComponentTransfer>
+        <feGaussianBlur in="turbulence" stdDeviation="1" result="softMap" />
+        <feSpecularLighting
+          in="softMap"
+          surfaceScale="5"
+          specularConstant="1"
+          specularExponent="100"
+          lightingColor="#fff"
+          result="specLight"
+        >
+          <fePointLight x="-200" y="-200" z="300" />
+        </feSpecularLighting>
+        <feComposite
+          in="specLight"
+          operator="arithmetic"
+          k1="0"
+          k2="1"
+          k3="1"
+          k4="0"
+          result="litImage"
+        />
+        <feDisplacementMap
+          in="SourceGraphic"
+          in2="softMap"
+          scale="44"
+          xChannelSelector="R"
+          yChannelSelector="G"
+        />
+      </filter>
+    </svg>
+  );
+}
+
+function AxisRangeControl({
+  title,
+  description,
+  value,
+  limits,
+  step,
+  onChange,
+}: {
+  title: string;
+  description: string;
+  value: AxisRange;
+  limits: AxisRange;
+  step: number;
+  onChange: (range: AxisRange) => void;
+}) {
+  const normalized = normalizeAxisRange(value);
+  const applyRange = (next: AxisRange) => {
+    onChange(normalizeAxisRange(next, limits, step));
+  };
+
+  return (
+    <div className="axis-range-control">
+      <div className="axis-range-copy">
+        <div className="axis-range-title">{title}</div>
+        <div className="axis-range-description">{description}</div>
+      </div>
+      <div className="axis-range-fields">
+        <input
+          className="axis-range-slider"
+          type="range"
+          min={limits.min}
+          max={limits.max}
+          step={step}
+          value={normalized.max}
+          onChange={(e) =>
+            applyRange({ ...normalized, max: parseFloat(e.target.value) })
+          }
+          aria-label={`${title} 最大値`}
+        />
+        <div className="axis-range-inputs">
+          <input
+            className="axis-number"
+            type="number"
+            min={limits.min}
+            max={limits.max}
+            step={step}
+            value={normalized.min}
+            onChange={(e) =>
+              applyRange({ ...normalized, min: parseFloat(e.target.value) })
+            }
+            aria-label={`${title} 最小値`}
+          />
+          <input
+            className="axis-number"
+            type="number"
+            min={limits.min}
+            max={limits.max}
+            step={step}
+            value={normalized.max}
+            onChange={(e) =>
+              applyRange({ ...normalized, max: parseFloat(e.target.value) })
+            }
+            aria-label={`${title} 最大値`}
+          />
         </div>
       </div>
     </div>
@@ -463,6 +741,28 @@ function clamp(v: number, min: number, max: number) {
   return Math.max(min, Math.min(max, v));
 }
 
+function normalizeAxisRange(range: AxisRange, limits?: AxisRange, minSpan = 1) {
+  const lowerLimit = limits?.min ?? Number.NEGATIVE_INFINITY;
+  const upperLimit = limits?.max ?? Number.POSITIVE_INFINITY;
+  const rawMin = Number.isFinite(range.min) ? range.min : (limits?.min ?? 0);
+  const rawMax = Number.isFinite(range.max)
+    ? range.max
+    : (limits?.max ?? rawMin + minSpan);
+  let min = clamp(rawMin, lowerLimit, upperLimit);
+  let max = clamp(rawMax, lowerLimit, upperLimit);
+
+  if (max < min) {
+    [min, max] = [max, min];
+  }
+
+  if (max - min < minSpan) {
+    min = clamp(min, lowerLimit, upperLimit - minSpan);
+    max = min + minSpan;
+  }
+
+  return { min, max };
+}
+
 function formatTime(seconds: number) {
   if (!Number.isFinite(seconds) || seconds <= 0) return "0:00.000";
   const minutes = Math.floor(seconds / 60);
@@ -470,11 +770,14 @@ function formatTime(seconds: number) {
   return `${minutes}:${rest.toFixed(3).padStart(6, "0")}`;
 }
 
+function isAbortError(error: unknown) {
+  return error instanceof DOMException && error.name === "AbortError";
+}
+
 function drawChart(
   canvas: HTMLCanvasElement | null,
   data: number[],
-  min: number,
-  max: number,
+  axisRange: AxisRange,
   color: string,
 ) {
   if (!canvas) return;
@@ -482,30 +785,65 @@ function drawChart(
   if (!ctx) return;
   const w = canvas.width;
   const h = canvas.height;
-  ctx.clearRect(0, 0, w, h);
+  const { min, max } = normalizeAxisRange(axisRange);
+  const plotLeft = 44;
+  const plotRight = w - 8;
+  const plotTop = 8;
+  const plotBottom = h - 20;
+  const plotWidth = Math.max(1, plotRight - plotLeft);
+  const plotHeight = Math.max(1, plotBottom - plotTop);
 
-  // gridlines at 1/4 increments
-  ctx.strokeStyle = "#333";
+  ctx.fillStyle = "#fff";
+  ctx.fillRect(0, 0, w, h);
+
+  ctx.strokeStyle = "#d8dee6";
   ctx.lineWidth = 1;
-  for (let i = 1; i < 4; i++) {
-    const y = (i * h) / 4;
+  ctx.fillStyle = "#4b5563";
+  ctx.font = "11px ui-monospace, monospace";
+  ctx.textAlign = "right";
+  ctx.textBaseline = "middle";
+
+  for (let i = 0; i <= 4; i++) {
+    const ratio = i / 4;
+    const y = plotBottom - ratio * plotHeight;
+    const label = formatAxisTick(min + (max - min) * ratio);
     ctx.beginPath();
-    ctx.moveTo(0, y);
-    ctx.lineTo(w, y);
+    ctx.moveTo(plotLeft, y);
+    ctx.lineTo(plotRight, y);
     ctx.stroke();
+    ctx.fillText(label, plotLeft - 6, y);
   }
+
+  ctx.strokeStyle = "#9aa4b2";
+  ctx.beginPath();
+  ctx.moveTo(plotLeft, plotTop);
+  ctx.lineTo(plotLeft, plotBottom);
+  ctx.lineTo(plotRight, plotBottom);
+  ctx.stroke();
 
   if (data.length < 2) return;
 
   ctx.strokeStyle = color;
   ctx.lineWidth = 1.5;
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(plotLeft, plotTop, plotWidth, plotHeight);
+  ctx.clip();
   ctx.beginPath();
   for (let i = 0; i < data.length; i++) {
     const v = Math.max(min, Math.min(max, data[i]));
-    const x = (i / (HISTORY_CAP - 1)) * w;
-    const y = h - ((v - min) / (max - min)) * h;
+    const x = plotLeft + (i / (HISTORY_CAP - 1)) * plotWidth;
+    const y = plotBottom - ((v - min) / (max - min)) * plotHeight;
     if (i === 0) ctx.moveTo(x, y);
     else ctx.lineTo(x, y);
   }
   ctx.stroke();
+  ctx.restore();
+}
+
+function formatAxisTick(value: number) {
+  if (Math.abs(value) >= 100 || Number.isInteger(value)) {
+    return value.toFixed(0);
+  }
+  return value.toFixed(1);
 }
