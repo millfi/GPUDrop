@@ -1,5 +1,13 @@
 import { useEffect, useRef, useState, type ChangeEvent } from "react";
 import {
+  Glass,
+  GlassContainer,
+  HStack,
+  Html,
+  LiquidCanvas,
+  VStack,
+} from "@liquid-dom/react";
+import {
   ExportCanceledError,
   exportOverlayVideo,
   type ExportProgress,
@@ -252,7 +260,7 @@ export default function App() {
     exportAbortRef.current = abortController;
     setExporting(true);
     setExportProgress(null);
-    let lastExportProgress: ExportProgress | null = null;
+    let lastExportProgress: ExportProgress | null = null as any;
 
     try {
       await exportOverlayVideo({
@@ -422,57 +430,87 @@ export default function App() {
                 <LoadingIcon />
               </div>
             )}
-            <div
+            <LiquidCanvas
               className={`video-overlay${overlayVisible ? "" : " is-hidden"}`}
+              style={{ display: "block" }}
+              canvasStyle={{ position: "absolute", inset: 0 }}
             >
-              <div className="player-controls">
-                <button
-                  type="button"
-                  className="icon-button"
-                  onClick={stepBackward}
-                  disabled={!running || exporting}
-                  title="1フレーム戻る"
-                  aria-label="1フレーム戻る"
-                >
-                  <StepBackIcon />
-                </button>
-                <button
-                  type="button"
-                  className="icon-button"
-                  onClick={togglePlayback}
-                  disabled={!running || exporting}
-                  title={paused ? "再生" : "一時停止"}
-                  aria-label={paused ? "再生" : "一時停止"}
-                >
-                  {paused ? <PlayIcon /> : <PauseIcon />}
-                </button>
-                <button
-                  type="button"
-                  className="icon-button"
-                  onClick={stepForward}
-                  disabled={!running || exporting}
-                  title="1フレーム進む"
-                  aria-label="1フレーム進む"
-                >
-                  <StepForwardIcon />
-                </button>
-              </div>
-              <label className="seek-control">
-                <input
-                  type="range"
-                  min={0}
-                  max={duration || 0}
-                  step={0.001}
-                  value={Math.min(seekValue, duration || 0)}
-                  disabled={!running || exporting || duration <= 0}
-                  onChange={(e) => seek(parseFloat(e.target.value))}
-                  aria-label="シーク"
-                />
-                <span>
-                  {formatTime(seekValue)} / {formatTime(duration)}
-                </span>
-              </label>
-            </div>
+              <GlassContainer
+                blur={12}
+                spacing={12}
+                thickness={40}
+                tint={{ r: 0.12, g: 0.12, b: 0.14, a: 0.55 }}
+                ior={1.4}
+                specularStrength={0.9}
+                specularWidth={0.6}
+              >
+                <VStack spacing={12} alignment="center">
+                  <HStack spacing={12}>
+                    <Glass cornerRadius={24} pointerEvents>
+                      <Html>
+                        <button
+                          type="button"
+                          className="icon-button"
+                          onClick={stepBackward}
+                          disabled={!running || exporting}
+                          title="1フレーム戻る"
+                          aria-label="1フレーム戻る"
+                        >
+                          <StepBackIcon />
+                        </button>
+                      </Html>
+                    </Glass>
+                    <Glass cornerRadius={24} pointerEvents>
+                      <Html>
+                        <button
+                          type="button"
+                          className="icon-button"
+                          onClick={togglePlayback}
+                          disabled={!running || exporting}
+                          title={paused ? "再生" : "一時停止"}
+                          aria-label={paused ? "再生" : "一時停止"}
+                        >
+                          {paused ? <PlayIcon /> : <PauseIcon />}
+                        </button>
+                      </Html>
+                    </Glass>
+                    <Glass cornerRadius={24} pointerEvents>
+                      <Html>
+                        <button
+                          type="button"
+                          className="icon-button"
+                          onClick={stepForward}
+                          disabled={!running || exporting}
+                          title="1フレーム進む"
+                          aria-label="1フレーム進む"
+                        >
+                          <StepForwardIcon />
+                        </button>
+                      </Html>
+                    </Glass>
+                  </HStack>
+                  <Glass cornerRadius={16} pointerEvents>
+                    <Html>
+                      <label className="seek-control">
+                        <input
+                          type="range"
+                          min={0}
+                          max={duration || 0}
+                          step={0.001}
+                          value={Math.min(seekValue, duration || 0)}
+                          disabled={!running || exporting || duration <= 0}
+                          onChange={(e) => seek(parseFloat(e.target.value))}
+                          aria-label="シーク"
+                        />
+                        <span>
+                          {formatTime(seekValue)} / {formatTime(duration)}
+                        </span>
+                      </label>
+                    </Html>
+                  </Glass>
+                </VStack>
+              </GlassContainer>
+            </LiquidCanvas>
           </div>
           <div className="panel-block">
             <div>差分</div>
