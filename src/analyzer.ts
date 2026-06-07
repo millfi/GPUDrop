@@ -10,8 +10,20 @@
 // `prevTex` and `currTex` are swapped after each compare() to avoid copying
 // the same VideoFrame twice.
 
+export interface RectMask {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
 const COMPUTE_SHADER = /* wgsl */ `
-struct Params { threshold: f32 };
+struct Params {
+  threshold: f32,
+  maskEnabled: u32,
+  maskMin: vec2<u32>,
+  maskMax: vec2<u32>,
+};
 
 @group(0) @binding(0) var prevTex: texture_2d<f32>;
 @group(0) @binding(1) var currTex: texture_2d<f32>;
@@ -28,6 +40,18 @@ fn s2l(c: f32) -> f32 {
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   let dims = textureDimensions(prevTex);
   if (id.x >= dims.x || id.y >= dims.y) { return; }
+  if (
+    params.maskEnabled != 0u &&
+    id.x >= params.maskMin.x && id.x < params.maskMax.x &&
+    id.y >= params.maskMin.y && id.y < params.maskMax.y
+  ) {
+    textureStore(
+      diffTex,
+      vec2<i32>(id.xy),
+      vec4<f32>(0.05, 0.16, 0.24, 1.0)
+    );
+    return;
+  }
   let p = textureLoad(prevTex, vec2<i32>(id.xy), 0).rgb;
   let c = textureLoad(currTex, vec2<i32>(id.xy), 0).rgb;
   let pl = vec3<f32>(s2l(p.r), s2l(p.g), s2l(p.b));
@@ -138,7 +162,7 @@ export class Analyzer {
       usage: B.MAP_READ | B.COPY_DST,
     });
     this.uniBuf = this.device.createBuffer({
-      size: 16,
+      size: 24,
       usage: B.UNIFORM | B.COPY_DST,
     });
 
@@ -175,8 +199,9 @@ export class Analyzer {
   async compare(
     frame: VideoFrame,
     threshold: number,
+    mask: RectMask | null = null,
   ): Promise<{ diffCount: number; isFirst: boolean }> {
-    return this.enqueueWork(() => this.compareImpl(frame, threshold));
+    return this.enqueueWork(() => this.compareImpl(frame, threshold, mask));
   }
 
   async prime(frame: VideoFrame) {
@@ -187,6 +212,7 @@ export class Analyzer {
     prevImage: ImageBitmap,
     currImage: ImageBitmap,
     threshold: number,
+    mask: RectMask | null = null,
   ) {
     await this.enqueueWork(async () => {
       this.device.queue.copyExternalImageToTexture(
@@ -203,6 +229,7 @@ export class Analyzer {
         this.scratchPrevTex,
         this.scratchCurrTex,
         threshold,
+        mask,
         false,
       );
     });
@@ -222,6 +249,7 @@ export class Analyzer {
   private async compareImpl(
     frame: VideoFrame,
     threshold: number,
+    mask: RectMask | null,
   ): Promise<{ diffCount: number; isFirst: boolean }> {
     // Always copy the new frame into currTex.
     this.device.queue.copyExternalImageToTexture(
@@ -242,6 +270,7 @@ export class Analyzer {
       this.prevTex,
       this.currTex,
       threshold,
+      mask,
       true,
     );
 
@@ -263,12 +292,22 @@ export class Analyzer {
     prevTex: GPUTexture,
     currTex: GPUTexture,
     threshold: number,
+    mask: RectMask | null,
     readCount: boolean,
   ) {
+    const bounds = getMaskPixelBounds(mask, this.w, this.h);
+    const params = new ArrayBuffer(24);
+    const paramsView = new DataView(params);
+    paramsView.setFloat32(0, threshold, true);
+    paramsView.setUint32(4, bounds ? 1 : 0, true);
+    paramsView.setUint32(8, bounds?.minX ?? 0, true);
+    paramsView.setUint32(12, bounds?.minY ?? 0, true);
+    paramsView.setUint32(16, bounds?.maxX ?? 0, true);
+    paramsView.setUint32(20, bounds?.maxY ?? 0, true);
     this.device.queue.writeBuffer(
       this.uniBuf,
       0,
-      new Float32Array([threshold, 0, 0, 0]),
+      params,
     );
     this.device.queue.writeBuffer(this.counterBuf, 0, new Uint32Array([0]));
 
@@ -371,4 +410,39 @@ export class Analyzer {
     );
     return run;
   }
+}
+
+export function getAnalyzedPixelCount(
+  mask: RectMask | null,
+  width: number,
+  height: number,
+) {
+  const totalPixels = width * height;
+  const bounds = getMaskPixelBounds(mask, width, height);
+  if (!bounds) return totalPixels;
+  const maskedPixels =
+    (bounds.maxX - bounds.minX) * (bounds.maxY - bounds.minY);
+  return Math.max(0, totalPixels - maskedPixels);
+}
+
+function getMaskPixelBounds(
+  mask: RectMask | null,
+  width: number,
+  height: number,
+) {
+  if (!mask || width <= 0 || height <= 0) return null;
+  const x1 = clamp(mask.x, 0, 1);
+  const y1 = clamp(mask.y, 0, 1);
+  const x2 = clamp(mask.x + mask.width, 0, 1);
+  const y2 = clamp(mask.y + mask.height, 0, 1);
+  const minX = Math.floor(Math.min(x1, x2) * width);
+  const minY = Math.floor(Math.min(y1, y2) * height);
+  const maxX = Math.ceil(Math.max(x1, x2) * width);
+  const maxY = Math.ceil(Math.max(y1, y2) * height);
+  if (maxX <= minX || maxY <= minY) return null;
+  return { minX, minY, maxX, maxY };
+}
+
+function clamp(value: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, value));
 }

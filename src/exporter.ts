@@ -12,7 +12,11 @@ import {
   type VideoCodec,
   type VideoEncodingConfig,
 } from "mediabunny";
-import { Analyzer } from "./analyzer";
+import {
+  Analyzer,
+  getAnalyzedPixelCount,
+  type RectMask,
+} from "./analyzer";
 import type { DupEvent, Stats } from "./player";
 
 const HISTORY_CAP = 600;
@@ -111,6 +115,7 @@ export interface ExportOptions {
   diffCanvas: HTMLCanvasElement;
   threshold: number;
   frameThreshold: number;
+  mask: RectMask | null;
   fpsRange: AxisRange;
   ftRange: AxisRange;
   signal: AbortSignal;
@@ -197,7 +202,11 @@ export async function exportOverlayVideo(options: ExportOptions) {
     const sourceHeight = await track.getCodedHeight();
     const outputWidth = roundUpToEven(sourceWidth);
     const outputHeight = roundUpToEven(sourceHeight);
-    const totalPixels = sourceWidth * sourceHeight;
+    const analyzedPixels = getAnalyzedPixelCount(
+      options.mask,
+      sourceWidth,
+      sourceHeight,
+    );
 
     outputCanvas.width = outputWidth;
     outputCanvas.height = outputHeight;
@@ -252,7 +261,11 @@ export async function exportOverlayVideo(options: ExportOptions) {
         frameNumber++;
         let diffCount = 0;
         let isFirst = true;
-        const result = await analyzer.compare(frame, options.threshold);
+        const result = await analyzer.compare(
+          frame,
+          options.threshold,
+          options.mask,
+        );
         diffCount = result.diffCount;
         isFirst = result.isFirst;
         frame.close();
@@ -261,7 +274,8 @@ export async function exportOverlayVideo(options: ExportOptions) {
           previousUniqueTimestamp = relativeTimestamp;
           uniqueTimestamps.push(relativeTimestamp);
         } else {
-          const ratio = totalPixels > 0 ? diffCount / totalPixels : 0;
+          const ratio =
+            analyzedPixels > 0 ? diffCount / analyzedPixels : 0;
           if (ratio <= options.frameThreshold) {
             options.onDuplicate({
               timestamp: relativeTimestamp,

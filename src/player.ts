@@ -14,7 +14,11 @@ import {
   VideoSampleSink,
   type VideoSample,
 } from "mediabunny";
-import { Analyzer } from "./analyzer";
+import {
+  Analyzer,
+  getAnalyzedPixelCount,
+  type RectMask,
+} from "./analyzer";
 
 const FRAME_SNAPSHOT_CACHE_SIZE = 120;
 const PREVIOUS_SAMPLE_EPSILON = 1e-9;
@@ -47,6 +51,7 @@ interface Options {
   diffCanvas: HTMLCanvasElement;
   threshold: number; // per-pixel linearRGB distance threshold
   frameThreshold: number; // ratio of differing pixels to total pixels above which the frame is considered "different"
+  mask: RectMask | null;
   onStats: (s: Stats, e?: StatsEvent) => void;
   onDuplicate: (e: DupEvent) => void;
   onEnd?: () => void;
@@ -61,6 +66,7 @@ interface FrameSnapshot {
 interface FrameRecord {
   sampleTimestamp: number;
   diffThreshold: number;
+  mask: RectMask | null;
   stats: Stats;
 }
 
@@ -90,6 +96,7 @@ export class Player {
   private sampleSink: VideoSampleSink | null = null;
   private threshold: number;
   private frameThreshold: number;
+  private mask: RectMask | null;
   private totalPixels = 0;
   private stopped = false;
   private mediaStartTime = 0;
@@ -133,6 +140,7 @@ export class Player {
     this.opts = opts;
     this.threshold = opts.threshold;
     this.frameThreshold = opts.frameThreshold;
+    this.mask = opts.mask;
   }
 
   setThreshold(t: number) {
@@ -141,6 +149,10 @@ export class Player {
 
   setFrameThreshold(t: number) {
     this.frameThreshold = t;
+  }
+
+  setMask(mask: RectMask | null) {
+    this.mask = mask;
   }
 
   pause() {
@@ -447,7 +459,11 @@ export class Player {
       let diffCount = 0;
       let isFirst = true;
       if (this.analyzer) {
-        const r = await this.analyzer.compare(frame, this.threshold);
+        const r = await this.analyzer.compare(
+          frame,
+          this.threshold,
+          this.mask,
+        );
         diffCount = r.diffCount;
         isFirst = r.isFirst;
       }
@@ -463,6 +479,7 @@ export class Player {
       const recordIndex = this.pushRecord({
         sampleTimestamp,
         diffThreshold: this.threshold,
+        mask: this.mask ? { ...this.mask } : null,
         stats,
       });
       this.cacheSnapshot(recordIndex, {
@@ -649,7 +666,12 @@ export class Player {
       this.prevUniqueT = tSec;
       this.uniqueTs.push(tSec);
     } else {
-      const ratio = this.totalPixels > 0 ? diffCount / this.totalPixels : 0;
+      const analyzedPixels = getAnalyzedPixelCount(
+        this.mask,
+        this.opts.videoCanvas.width,
+        this.opts.videoCanvas.height,
+      );
+      const ratio = analyzedPixels > 0 ? diffCount / analyzedPixels : 0;
       if (ratio <= this.frameThreshold) {
         if (notifyDuplicate) {
           this.opts.onDuplicate({
@@ -751,6 +773,7 @@ export class Player {
         prevSnapshot.image,
         snapshot.image,
         record.diffThreshold,
+        record.mask,
       );
       return;
     }
@@ -761,6 +784,7 @@ export class Player {
         prevImage,
         snapshot.image,
         record.diffThreshold,
+        record.mask,
       );
     } finally {
       prevImage.close();

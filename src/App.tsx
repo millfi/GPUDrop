@@ -5,6 +5,7 @@ import {
   type ExportProgress,
 } from "./exporter";
 import { Player, type Stats, type DupEvent, type StatsEvent } from "./player";
+import type { RectMask } from "./analyzer";
 
 const HISTORY_CAP = 600;
 const EVENTS_CAP = 100;
@@ -34,6 +35,8 @@ export default function App() {
   const [file, setFile] = useState<File | null>(null);
   const [threshold, setThreshold] = useState(0.05);
   const [frameThreshold, setFrameThreshold] = useState(0.0006);
+  const [mask, setMask] = useState<RectMask | null>(null);
+  const [maskEditing, setMaskEditing] = useState(false);
   const [running, setRunning] = useState(false);
   const [paused, setPaused] = useState(false);
   const [duration, setDuration] = useState(0);
@@ -63,6 +66,7 @@ export default function App() {
   const ftRangeRef = useRef(ftRange);
   const seekRequestIdRef = useRef(0);
   const exportAbortRef = useRef<AbortController | null>(null);
+  const maskStartRef = useRef<{ x: number; y: number } | null>(null);
 
   useEffect(() => {
     playerRef.current?.setThreshold(threshold);
@@ -71,6 +75,10 @@ export default function App() {
   useEffect(() => {
     playerRef.current?.setFrameThreshold(frameThreshold);
   }, [frameThreshold]);
+
+  useEffect(() => {
+    playerRef.current?.setMask(mask);
+  }, [mask]);
 
   useEffect(() => {
     return () => {
@@ -157,6 +165,7 @@ export default function App() {
       diffCanvas: diffCanvas.current!,
       threshold,
       frameThreshold,
+      mask,
       onStats: updateStats,
       onDuplicate: recordDuplicateEvent,
       onEnd: () => {
@@ -265,6 +274,7 @@ export default function App() {
         diffCanvas: diffCanvas.current!,
         threshold,
         frameThreshold,
+        mask,
         fpsRange: fpsRangeRef.current,
         ftRange: ftRangeRef.current,
         signal: abortController.signal,
@@ -295,6 +305,40 @@ export default function App() {
 
   const cancelExport = () => {
     exportAbortRef.current?.abort();
+  };
+
+  const startMaskSelection = () => {
+    setMaskEditing(true);
+    setOverlayVisible(false);
+  };
+
+  const handleMaskPointerDown = (
+    e: React.PointerEvent<HTMLDivElement>,
+  ) => {
+    if (!maskEditing || e.button !== 0) return;
+    const point = getNormalizedPointer(e);
+    maskStartRef.current = point;
+    e.currentTarget.setPointerCapture(e.pointerId);
+    setMask({ x: point.x, y: point.y, width: 0, height: 0 });
+  };
+
+  const handleMaskPointerMove = (
+    e: React.PointerEvent<HTMLDivElement>,
+  ) => {
+    const start = maskStartRef.current;
+    if (!maskEditing || !start) return;
+    setMask(rectFromPoints(start, getNormalizedPointer(e)));
+  };
+
+  const finishMaskSelection = (e: React.PointerEvent<HTMLDivElement>) => {
+    const start = maskStartRef.current;
+    if (!start) return;
+    const next = rectFromPoints(start, getNormalizedPointer(e));
+    maskStartRef.current = null;
+    setMask(
+      next.width >= 0.002 && next.height >= 0.002 ? next : null,
+    );
+    setMaskEditing(false);
   };
 
   const recordDuplicateEvent = (e: DupEvent) => {
@@ -375,6 +419,23 @@ export default function App() {
             onChange={(e) => setThreshold(parseFloat(e.target.value))}
           />
         </label>
+        <button
+          type="button"
+          onClick={startMaskSelection}
+          disabled={!stats || exporting || maskEditing}
+        >
+          {mask ? "マスクを再選択" : "マスク範囲を選択"}
+        </button>
+        {mask && (
+          <button
+            type="button"
+            onClick={() => setMask(null)}
+            disabled={!stats || exporting}
+          >
+            マスク解除
+          </button>
+        )}
+        {maskEditing && <span>映像上をドラッグしてください</span>}
         <label>
           フレーム閾値: {(frameThreshold * 100).toFixed(3)}%
           <input
@@ -421,6 +482,26 @@ export default function App() {
           <div>映像</div>
           <div ref={videoPanelRef} className="video-panel">
             <canvas ref={videoCanvas} />
+            <div
+              className={`mask-layer${maskEditing ? " is-editing" : ""}`}
+              onPointerDown={handleMaskPointerDown}
+              onPointerMove={handleMaskPointerMove}
+              onPointerUp={finishMaskSelection}
+              onPointerCancel={finishMaskSelection}
+              aria-label="差分判定から除外する領域"
+            >
+              {mask && (
+                <div
+                  className="mask-rectangle"
+                  style={{
+                    left: `${mask.x * 100}%`,
+                    top: `${mask.y * 100}%`,
+                    width: `${mask.width * 100}%`,
+                    height: `${mask.height * 100}%`,
+                  }}
+                />
+              )}
+            </div>
             {seeking && (
               <div className="seek-loading" role="status" aria-label="シーク中">
                 <LoadingIcon />
@@ -743,6 +824,26 @@ function clearCanvas(c: HTMLCanvasElement | null) {
 function clamp(v: number, min: number, max: number) {
   if (max < min) return min;
   return Math.max(min, Math.min(max, v));
+}
+
+function getNormalizedPointer(e: React.PointerEvent<HTMLElement>) {
+  const rect = e.currentTarget.getBoundingClientRect();
+  return {
+    x: clamp((e.clientX - rect.left) / rect.width, 0, 1),
+    y: clamp((e.clientY - rect.top) / rect.height, 0, 1),
+  };
+}
+
+function rectFromPoints(
+  a: { x: number; y: number },
+  b: { x: number; y: number },
+): RectMask {
+  return {
+    x: Math.min(a.x, b.x),
+    y: Math.min(a.y, b.y),
+    width: Math.abs(b.x - a.x),
+    height: Math.abs(b.y - a.y),
+  };
 }
 
 function normalizeAxisRange(range: AxisRange, limits?: AxisRange, minSpan = 1) {
