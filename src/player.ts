@@ -112,6 +112,7 @@ export class Player {
   private prerollUntilTime: number | null = null;
   private activeFrameDone: Promise<void> | null = null;
   private resolveActiveFrameDone: (() => void) | null = null;
+  private ended = false;
   private delayWaiters: (() => void)[] = [];
   private pauseWaiters: (() => void)[] = [];
   private frameRecords: FrameRecord[] = [];
@@ -150,7 +151,21 @@ export class Player {
   }
 
   resume() {
-    if (this.stopped || !this.paused) return;
+    if (this.stopped) return;
+    if (!this.paused && !this.ended) return;
+    if (this.ended) {
+      this.ended = false;
+      this.paused = false;
+      this.pauseStarted = 0;
+      this.shiftPlaybackClock();
+      const resumeTime =
+        this.frameRecords[this.historyIndex]?.sampleTimestamp ??
+        this.mediaStartTime;
+      this.runPlayback(resumeTime).catch(console.error);
+      this.resolvePauseWaiters();
+      this.opts.onPausedChange?.(false);
+      return;
+    }
     this.shiftPlaybackClock();
     this.paused = false;
     this.pauseStarted = 0;
@@ -290,14 +305,23 @@ export class Player {
 
       const sink = new VideoSampleSink(track);
       this.sampleSink = sink;
-      await this.playSamplesFrom(this.mediaStartTime);
-      if (!this.stopped) this.stop();
+      await this.runPlayback(this.mediaStartTime);
     } catch (e) {
       if (this.stopped) return;
       console.error(e);
       alert((e as Error).message);
       this.stop();
     }
+  }
+
+  private async runPlayback(startTime: number) {
+    await this.playSamplesFrom(startTime);
+    if (this.stopped) return;
+    this.ended = true;
+    this.paused = true;
+    this.pauseStarted = performance.now();
+    this.opts.onPausedChange?.(true);
+    this.opts.onEnd?.();
   }
 
   private async processSample(sample: VideoSample) {
@@ -455,6 +479,7 @@ export class Player {
   stop() {
     if (this.stopped) return;
     this.stopped = true;
+    this.ended = false;
     this.resolvePauseWaiters();
     this.resolveDelayWaiters();
     this.resolveActiveFrameDone?.();

@@ -162,8 +162,6 @@ export default function App() {
       onEnd: () => {
         seekRequestIdRef.current++;
         setSeeking(false);
-        setRunning(false);
-        setPaused(false);
       },
       onReady: ({ timestamp, duration }) => {
         setDuration(duration);
@@ -186,8 +184,14 @@ export default function App() {
 
   const togglePlayback = () => {
     if (!playerRef.current || exporting) return;
-    if (paused) playerRef.current.resume();
-    else playerRef.current.pause();
+    if (!running) {
+      playerRef.current.resume();
+      setRunning(true);
+    } else if (paused) {
+      playerRef.current.resume();
+    } else {
+      playerRef.current.pause();
+    }
   };
 
   const stepBackward = () => {
@@ -228,7 +232,7 @@ export default function App() {
       .catch(console.error)
       .finally(() => {
         if (seekRequestIdRef.current === requestId) setSeeking(false);
-    });
+      });
   };
 
   const startExport = async () => {
@@ -430,7 +434,7 @@ export default function App() {
                   type="button"
                   className="icon-button"
                   onClick={stepBackward}
-                  disabled={!running || exporting}
+                  disabled={exporting}
                   title="1フレーム戻る"
                   aria-label="1フレーム戻る"
                 >
@@ -440,7 +444,7 @@ export default function App() {
                   type="button"
                   className="icon-button"
                   onClick={togglePlayback}
-                  disabled={!running || exporting}
+                  disabled={exporting}
                   title={paused ? "再生" : "一時停止"}
                   aria-label={paused ? "再生" : "一時停止"}
                 >
@@ -450,7 +454,7 @@ export default function App() {
                   type="button"
                   className="icon-button"
                   onClick={stepForward}
-                  disabled={!running || exporting}
+                  disabled={exporting}
                   title="1フレーム進む"
                   aria-label="1フレーム進む"
                 >
@@ -464,7 +468,7 @@ export default function App() {
                   max={duration || 0}
                   step={0.001}
                   value={Math.min(seekValue, duration || 0)}
-                  disabled={!running || exporting || duration <= 0}
+                  disabled={exporting || duration <= 0}
                   onChange={(e) => seek(parseFloat(e.target.value))}
                   aria-label="シーク"
                 />
