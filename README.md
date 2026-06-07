@@ -2,27 +2,27 @@
 
 ゲームキャプチャ動画のFPSを推定するアプリ。連続する2フレームをWebGPUシェーダで比較し、同一フレームを検出することで実効FPSを算出します。
 
-## 仕組み
+## 概要
 
-- **デコード**: WebCodecs (`VideoDecoder`) + mp4box.js でMP4を逐次デコード
+- **高速デコード**: WebCodecs (`VideoDecoder`) + mp4box.js でMP4を逐次デコード
 - **比較**: WebGPU compute shader で同一座標のピクセルを比較し、linearRGB空間でのユークリッド距離が閾値を超えたピクセル数を数える (sRGB→linear変換はシェーダ内)
 - **同一フレーム判定**: 閾値超過ピクセル数が閾値割合を超えると重複フレーム(フレームドロップ発生)と判定
 - **FPS**: 直近1秒間のユニークフレーム数を視覚化
-- **再生**: 各フレームのタイムスタンプに合わせてwall-clockに同期
 
 ## 使い方
-
-```bash
+[GPUDrop](https://millfi.github.io/GPUDrop/)にアクセス
+## build & run
+```shell
+git clone https://github.com/millfi/GPUDrop.git
+cd ./GPUDrop
 npm install
 npm run dev
 ```
+を実行してnpmに案内されたlocalhostを開き、MP4ファイルを選択 → 閾値を調整 → 「開始」。
 
-ブラウザで開いてMP4ファイルを選択 → 閾値を調整 → 「開始」。
+## 備考
 
-## 必要環境
-
-- Chrome / Edge (WebGPU + WebCodecs対応)
-- 入力: MediaBunnyが対応する動画コーデック/コンテナ
+SafariとFirefoxでは動かない可能性が高い。
 
 ## 操作
 
