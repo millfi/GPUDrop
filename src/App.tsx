@@ -11,6 +11,7 @@ const HISTORY_CAP = 600;
 const EVENTS_CAP = 100;
 const FPS_AXIS_LIMITS = { min: 0, max: 240 };
 const FT_AXIS_LIMITS = { min: 0, max: 200 };
+const HISTORY_AXIS_LIMITS = { min: 10, max: 1200 };
 const ACCEPTED_MEDIA_TYPES = [
   "video/*",
   ".mp4",
@@ -52,6 +53,7 @@ export default function App() {
   const [events, setEvents] = useState<DupEvent[]>([]);
   const [fpsRange, setFpsRange] = useState<AxisRange>({ min: 0, max: 144 });
   const [ftRange, setFtRange] = useState<AxisRange>({ min: 0, max: 100 });
+  const [historyRange, setHistoryRange] = useState<AxisRange>({ min: 10, max: 600 });
 
   const videoCanvas = useRef<HTMLCanvasElement>(null);
   const videoPanelRef = useRef<HTMLDivElement>(null);
@@ -64,6 +66,7 @@ export default function App() {
   const historyIndexRef = useRef(-1);
   const fpsRangeRef = useRef(fpsRange);
   const ftRangeRef = useRef(ftRange);
+  const historyRangeRef = useRef(historyRange);
   const seekRequestIdRef = useRef(0);
   const exportAbortRef = useRef<AbortController | null>(null);
   const maskStartRef = useRef<{ x: number; y: number } | null>(null);
@@ -92,6 +95,11 @@ export default function App() {
     ftRangeRef.current = normalizeAxisRange(ftRange, FT_AXIS_LIMITS);
     drawHistoryCharts();
   }, [fpsRange, ftRange]);
+
+  useEffect(() => {
+    historyRangeRef.current = normalizeAxisRange(historyRange, HISTORY_AXIS_LIMITS);
+    drawHistoryCharts();
+  }, [historyRange]);
 
   useEffect(() => {
     const handlePointerDown = (e: PointerEvent) => {
@@ -378,20 +386,23 @@ export default function App() {
   };
 
   function drawHistoryCharts() {
+    const maxPoints = historyRangeRef.current.max;
     const end = historyIndexRef.current + 1;
-    const start = Math.max(0, end - HISTORY_CAP);
+    const start = Math.max(0, end - maxPoints);
     const visibleHistory = historyRef.current.slice(start, end);
     drawChart(
       fpsCanvas.current,
       visibleHistory.map((x) => x.fps),
       fpsRangeRef.current,
       "#159447",
+      maxPoints,
     );
     drawChart(
       ftCanvas.current,
       visibleHistory.map((x) => x.ft),
       ftRangeRef.current,
       "#0b8fb8",
+      maxPoints,
     );
   }
 
@@ -584,6 +595,14 @@ export default function App() {
               step={1}
               onChange={setFpsRange}
             />
+            <AxisRangeControl
+              title="横軸レンジ"
+              description="表示する履歴データポイント数（最大フレーム数）"
+              value={historyRange}
+              limits={HISTORY_AXIS_LIMITS}
+              step={10}
+              onChange={setHistoryRange}
+            />
           </div>
           <div className="chart-panel">
             <div className="chart-title">
@@ -602,6 +621,14 @@ export default function App() {
               limits={FT_AXIS_LIMITS}
               step={1}
               onChange={setFtRange}
+            />
+            <AxisRangeControl
+              title="横軸レンジ"
+              description="表示する履歴データポイント数（最大フレーム数）"
+              value={historyRange}
+              limits={HISTORY_AXIS_LIMITS}
+              step={10}
+              onChange={setHistoryRange}
             />
           </div>
         </div>
@@ -884,6 +911,7 @@ function drawChart(
   data: number[],
   axisRange: AxisRange,
   color: string,
+  maxPoints: number = HISTORY_CAP,
 ) {
   if (!canvas) return;
   const ctx = canvas.getContext("2d");
@@ -937,7 +965,7 @@ function drawChart(
   ctx.beginPath();
   for (let i = 0; i < data.length; i++) {
     const v = Math.max(min, Math.min(max, data[i]));
-    const x = plotLeft + (i / (HISTORY_CAP - 1)) * plotWidth;
+    const x = plotLeft + (i / (maxPoints - 1)) * plotWidth;
     const y = plotBottom - ((v - min) / (max - min)) * plotHeight;
     if (i === 0) ctx.moveTo(x, y);
     else ctx.lineTo(x, y);
