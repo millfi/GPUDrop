@@ -2,12 +2,15 @@ import {
   ALL_FORMATS,
   BlobSource,
   CanvasSource,
+  EncodedAudioPacketSource,
+  EncodedPacketSink,
   Input,
   Mp4OutputFormat,
   Output,
   StreamTarget,
   VideoSampleSink,
   canEncodeVideo,
+  type InputAudioTrack,
   type StreamTargetChunk,
   type VideoCodec,
   type VideoEncodingConfig,
@@ -17,9 +20,14 @@ import {
   getAnalyzedPixelCount,
   type RectMask,
 } from "./analyzer";
-import type { DupEvent, Stats } from "./player";
+import { FpsEstimator, type DupEvent, type Stats } from "./player";
+import {
+  drawOverlay,
+  type AxisRange,
+  type OverlayHistoryPoint,
+  type OverlayLayout,
+} from "./overlay";
 
-const HISTORY_CAP = 600;
 const EXPORT_QUALITY_FACTOR = 4;
 const DEFAULT_FRAME_DURATION = 1 / 60;
 const EXPORT_CHUNK_SIZE = 16 * 1024 * 1024;
@@ -97,11 +105,6 @@ const AV1_LEVEL_TABLE = [
   { maxPictureSize: 35651584, maxBitrate: 800_000_000, tier: "H", level: 19 },
 ] as const;
 
-export interface AxisRange {
-  min: number;
-  max: number;
-}
-
 export interface ExportProgress {
   timestamp: number;
   duration: number;
@@ -116,12 +119,18 @@ export interface ExportOptions {
   threshold: number;
   frameThreshold: number;
   mask: RectMask | null;
+  layout: OverlayLayout;
   fpsRange: AxisRange;
   ftRange: AxisRange;
+  historyMaxPoints: number;
   signal: AbortSignal;
   onStats: (stats: Stats) => void;
   onDuplicate: (event: DupEvent) => void;
   onProgress: (progress: ExportProgress) => void;
+}
+
+export interface ExportResult {
+  audioSkippedReason: string | null;
 }
 
 interface ExportTargetInfo {

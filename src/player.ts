@@ -45,6 +45,60 @@ export interface SeekInfo {
   duration: number;
 }
 
+export interface FpsSample {
+  fps: number;
+  frameTime: number; // seconds
+  isDuplicate: boolean;
+}
+
+// FPS estimation shared by live playback and export so the burned-in overlay
+// matches the on-screen numbers exactly. frameTime is the interval between
+// consecutive unique frames. fps is the count of unique frames in the rolling
+// 1-second window ending at the current frame.
+export class FpsEstimator {
+  private prevUniqueT = 0; // timestamp (s) of the most recent unique frame
+  private lastFt = 0; // most recent inter-unique interval (s)
+  private uniqueTs: number[] = [];
+
+  reset() {
+    this.prevUniqueT = 0;
+    this.lastFt = 0;
+    this.uniqueTs = [];
+  }
+
+  process(input: {
+    tSec: number;
+    diffCount: number;
+    isFirst: boolean;
+    analyzedPixels: number;
+    frameThreshold: number;
+  }): FpsSample {
+    let isDuplicate = false;
+    if (input.isFirst) {
+      this.prevUniqueT = input.tSec;
+      this.uniqueTs.push(input.tSec);
+    } else {
+      const ratio =
+        input.analyzedPixels > 0 ? input.diffCount / input.analyzedPixels : 0;
+      if (ratio <= input.frameThreshold) {
+        isDuplicate = true;
+      } else {
+        this.lastFt = input.tSec - this.prevUniqueT;
+        this.prevUniqueT = input.tSec;
+        this.uniqueTs.push(input.tSec);
+      }
+    }
+    while (this.uniqueTs.length > 0 && this.uniqueTs[0] <= input.tSec - 1) {
+      this.uniqueTs.shift();
+    }
+    return {
+      fps: this.uniqueTs.length,
+      frameTime: this.lastFt,
+      isDuplicate,
+    };
+  }
+}
+
 interface Options {
   file: File;
   videoCanvas: HTMLCanvasElement;
@@ -130,11 +184,7 @@ export class Player {
   private nextSnapshotSlot = 0;
   private historyIndex = -1;
 
-  // FPS estimation state. frameTime is the interval between consecutive
-  // unique frames. fps is the count of unique frames in the last 1 second.
-  private prevUniqueT = 0; // timestamp (s) of the most recent unique frame
-  private lastFt = 0; // most recent inter-unique interval (s)
-  private uniqueTs: number[] = [];
+  private fpsEstimator = new FpsEstimator();
 
   constructor(opts: Options) {
     this.opts = opts;
@@ -660,38 +710,28 @@ export class Player {
     isFirst: boolean,
     notifyDuplicate: boolean,
   ): Stats {
-    // frameTime updates on unique frames. fps is the number of unique frames
-    // observed in the rolling 1-second window ending at this frame.
-    if (isFirst) {
-      this.prevUniqueT = tSec;
-      this.uniqueTs.push(tSec);
-    } else {
-      const analyzedPixels = getAnalyzedPixelCount(
-        this.mask,
-        this.opts.videoCanvas.width,
-        this.opts.videoCanvas.height,
-      );
-      const ratio = analyzedPixels > 0 ? diffCount / analyzedPixels : 0;
-      if (ratio <= this.frameThreshold) {
-        if (notifyDuplicate) {
-          this.opts.onDuplicate({
-            timestamp: tSec,
-            frameNumber: this.frameNumber,
-          });
-        }
-      } else {
-        this.lastFt = tSec - this.prevUniqueT;
-        this.prevUniqueT = tSec;
-        this.uniqueTs.push(tSec);
-      }
-    }
-    while (this.uniqueTs.length > 0 && this.uniqueTs[0] <= tSec - 1) {
-      this.uniqueTs.shift();
+    const analyzedPixels = getAnalyzedPixelCount(
+      this.mask,
+      this.opts.videoCanvas.width,
+      this.opts.videoCanvas.height,
+    );
+    const sample = this.fpsEstimator.process({
+      tSec,
+      diffCount,
+      isFirst,
+      analyzedPixels,
+      frameThreshold: this.frameThreshold,
+    });
+    if (sample.isDuplicate && notifyDuplicate) {
+      this.opts.onDuplicate({
+        timestamp: tSec,
+        frameNumber: this.frameNumber,
+      });
     }
 
     return {
-      fps: this.uniqueTs.length,
-      frameTime: this.lastFt,
+      fps: sample.fps,
+      frameTime: sample.frameTime,
       timestamp: tSec,
       frameNumber: this.frameNumber,
     };
@@ -710,9 +750,7 @@ export class Player {
 
   private resetFpsState() {
     this.frameNumber = 0;
-    this.prevUniqueT = 0;
-    this.lastFt = 0;
-    this.uniqueTs = [];
+    this.fpsEstimator.reset();
   }
 
   private pushRecord(record: FrameRecord) {
