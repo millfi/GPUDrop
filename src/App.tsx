@@ -6,8 +6,25 @@ import {
 } from "./exporter";
 import { Player, type Stats, type DupEvent, type StatsEvent } from "./player";
 import type { RectMask } from "./analyzer";
+import {
+  FPS_COLOR,
+  FT_COLOR,
+  OVERLAY_ELEMENT_KINDS,
+  SCREEN_CHART_THEME,
+  applyOverlayDrag,
+  createDefaultOverlayLayout,
+  drawOverlay,
+  getOverlayElementRect,
+  loadOverlayLayout,
+  renderChart,
+  saveOverlayLayout,
+  type AxisRange,
+  type NormalizedRect,
+  type OverlayElementKind,
+  type OverlayHistoryPoint,
+  type OverlayLayout,
+} from "./overlay";
 
-const HISTORY_CAP = 600;
 const EVENTS_CAP = 100;
 const FPS_AXIS_LIMITS = { min: 0, max: 240 };
 const FT_AXIS_LIMITS = { min: 0, max: 200 };
@@ -27,9 +44,17 @@ const ACCEPTED_MEDIA_TYPES = [
   ".m3u8",
 ].join(",");
 
-interface AxisRange {
-  min: number;
-  max: number;
+const OVERLAY_ELEMENT_LABELS: Record<OverlayElementKind, string> = {
+  fpsValue: "FPS 数値",
+  fpsChart: "FPS グラフ",
+  ftChart: "フレームタイム グラフ",
+};
+
+interface OverlayDragState {
+  kind: OverlayElementKind;
+  mode: "move" | "resize";
+  startPoint: { x: number; y: number };
+  startRect: NormalizedRect;
 }
 
 export default function App() {
@@ -42,7 +67,14 @@ export default function App() {
   const [paused, setPaused] = useState(false);
   const [duration, setDuration] = useState(0);
   const [seekValue, setSeekValue] = useState(0);
-  const [overlayVisible, setOverlayVisible] = useState(true);
+  const [playerControlsVisible, setPlayerControlsVisible] = useState(true);
+  const [previewOverlayVisible, setPreviewOverlayVisible] = useState(true);
+  const [layoutEditing, setLayoutEditing] = useState(false);
+  const [selectedOverlayKind, setSelectedOverlayKind] =
+    useState<OverlayElementKind>("fpsValue");
+  const [overlayLayout, setOverlayLayout] = useState<OverlayLayout>(() =>
+    loadOverlayLayout(),
+  );
   const [seeking, setSeeking] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [exportProgress, setExportProgress] = useState<ExportProgress | null>(
@@ -56,20 +88,27 @@ export default function App() {
   const [historyRange, setHistoryRange] = useState<AxisRange>({ min: 10, max: 600 });
 
   const videoCanvas = useRef<HTMLCanvasElement>(null);
+  const overlayCanvas = useRef<HTMLCanvasElement>(null);
+  const overlayEditorRef = useRef<HTMLDivElement>(null);
   const videoPanelRef = useRef<HTMLDivElement>(null);
   const diffCanvas = useRef<HTMLCanvasElement>(null);
   const fpsCanvas = useRef<HTMLCanvasElement>(null);
   const ftCanvas = useRef<HTMLCanvasElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const playerRef = useRef<Player | null>(null);
-  const historyRef = useRef<{ fps: number; ft: number }[]>([]);
+  const historyRef = useRef<OverlayHistoryPoint[]>([]);
   const historyIndexRef = useRef(-1);
+  const statsRef = useRef<Stats | null>(null);
   const fpsRangeRef = useRef(fpsRange);
   const ftRangeRef = useRef(ftRange);
   const historyRangeRef = useRef(historyRange);
+  const overlayLayoutRef = useRef(overlayLayout);
+  const previewOverlayVisibleRef = useRef(previewOverlayVisible);
+  const layoutEditingRef = useRef(layoutEditing);
   const seekRequestIdRef = useRef(0);
   const exportAbortRef = useRef<AbortController | null>(null);
   const maskStartRef = useRef<{ x: number; y: number } | null>(null);
+  const overlayDragRef = useRef<OverlayDragState | null>(null);
 
   useEffect(() => {
     playerRef.current?.setThreshold(threshold);
@@ -94,19 +133,38 @@ export default function App() {
     fpsRangeRef.current = normalizeAxisRange(fpsRange, FPS_AXIS_LIMITS);
     ftRangeRef.current = normalizeAxisRange(ftRange, FT_AXIS_LIMITS);
     drawHistoryCharts();
+    drawPreviewOverlay();
   }, [fpsRange, ftRange]);
 
   useEffect(() => {
     historyRangeRef.current = normalizeAxisRange(historyRange, HISTORY_AXIS_LIMITS);
     drawHistoryCharts();
+    drawPreviewOverlay();
   }, [historyRange]);
+
+  useEffect(() => {
+    overlayLayoutRef.current = overlayLayout;
+    saveOverlayLayout(overlayLayout);
+    drawPreviewOverlay();
+  }, [overlayLayout]);
+
+  useEffect(() => {
+    previewOverlayVisibleRef.current = previewOverlayVisible;
+    drawPreviewOverlay();
+  }, [previewOverlayVisible]);
+
+  useEffect(() => {
+    layoutEditingRef.current = layoutEditing;
+    if (!layoutEditing) overlayDragRef.current = null;
+    drawPreviewOverlay();
+  }, [layoutEditing]);
 
   useEffect(() => {
     const handlePointerDown = (e: PointerEvent) => {
       if (e.button !== 0) return;
       const videoPanel = videoPanelRef.current;
       if (!videoPanel) return;
-      setOverlayVisible(videoPanel.contains(e.target as Node));
+      setPlayerControlsVisible(videoPanel.contains(e.target as Node));
     };
 
     document.addEventListener("pointerdown", handlePointerDown);
@@ -124,6 +182,7 @@ export default function App() {
     playerRef.current = null;
     historyRef.current = [];
     historyIndexRef.current = -1;
+    statsRef.current = null;
     setFile(null);
     setStats(null);
     setEvents([]);
@@ -135,9 +194,12 @@ export default function App() {
     setExporting(false);
     setExportProgress(null);
     setExportMessage("");
+    setMaskEditing(false);
+    setLayoutEditing(false);
     // Reset the file input so re-selecting the same file fires onChange.
     if (resetFileInput && fileInputRef.current) fileInputRef.current.value = "";
     clearCanvas(videoCanvas.current);
+    clearCanvas(overlayCanvas.current);
     clearCanvas(diffCanvas.current);
     drawHistoryCharts();
   };
@@ -159,6 +221,7 @@ export default function App() {
     playerRef.current?.stop();
     historyRef.current = [];
     historyIndexRef.current = -1;
+    statsRef.current = null;
     setEvents([]);
     setStats(null);
     setDuration(0);
@@ -179,6 +242,7 @@ export default function App() {
       onEnd: () => {
         seekRequestIdRef.current++;
         setSeeking(false);
+        setRunning(false);
       },
       onReady: ({ timestamp, duration }) => {
         setDuration(duration);
@@ -259,6 +323,7 @@ export default function App() {
     playerRef.current = null;
     historyRef.current = [];
     historyIndexRef.current = -1;
+    statsRef.current = null;
     setEvents([]);
     setStats(null);
     setDuration(0);
@@ -266,35 +331,46 @@ export default function App() {
     setSeeking(false);
     setRunning(false);
     setPaused(false);
+    setMaskEditing(false);
+    setLayoutEditing(false);
     setExportMessage("");
     drawHistoryCharts();
+    clearCanvas(overlayCanvas.current);
 
     const abortController = new AbortController();
     exportAbortRef.current = abortController;
     setExporting(true);
     setExportProgress(null);
-    let lastExportProgress: ExportProgress | null = null;
+    const progressSummary = { codecLabel: "" };
 
     try {
-      await exportOverlayVideo({
+      const result = await exportOverlayVideo({
         file,
         videoCanvas: videoCanvas.current!,
         diffCanvas: diffCanvas.current!,
         threshold,
         frameThreshold,
         mask,
+        layout: overlayLayoutRef.current.map((element) => ({
+          ...element,
+          rect: { ...element.rect },
+        })),
         fpsRange: fpsRangeRef.current,
         ftRange: ftRangeRef.current,
+        historyMaxPoints: historyRangeRef.current.max,
         signal: abortController.signal,
         onStats: updateStats,
         onDuplicate: recordDuplicateEvent,
         onProgress: (progress) => {
-          lastExportProgress = progress;
+          progressSummary.codecLabel = progress.codecLabel;
           setExportProgress(progress);
         },
       });
+      const audioNote = result.audioSkippedReason
+        ? ` — 音声なし: ${result.audioSkippedReason}`
+        : "";
       setExportMessage(
-        `書き出し完了${lastExportProgress?.codecLabel ? ` (${lastExportProgress.codecLabel})` : ""}`,
+        `書き出し完了${progressSummary.codecLabel ? ` (${progressSummary.codecLabel})` : ""}${audioNote}`,
       );
     } catch (e) {
       if (e instanceof ExportCanceledError || isAbortError(e)) {
@@ -315,9 +391,91 @@ export default function App() {
     exportAbortRef.current?.abort();
   };
 
+  const toggleLayoutEditor = () => {
+    const next = !layoutEditing;
+    overlayDragRef.current = null;
+    if (next) {
+      maskStartRef.current = null;
+      setMaskEditing(false);
+      setPlayerControlsVisible(false);
+    }
+    setLayoutEditing(next);
+  };
+
+  const setOverlayElementVisible = (
+    kind: OverlayElementKind,
+    visible: boolean,
+  ) => {
+    setOverlayLayout((current) =>
+      current.map((element) =>
+        element.kind === kind ? { ...element, visible } : element,
+      ),
+    );
+  };
+
+  const resetOverlayLayout = () => {
+    overlayDragRef.current = null;
+    setSelectedOverlayKind("fpsValue");
+    setOverlayLayout(createDefaultOverlayLayout());
+  };
+
+  const beginOverlayDrag = (
+    e: React.PointerEvent<HTMLElement>,
+    kind: OverlayElementKind,
+    mode: "move" | "resize",
+  ) => {
+    if (!layoutEditing || e.button !== 0) return;
+    const editor = overlayEditorRef.current;
+    const element = overlayLayoutRef.current.find((item) => item.kind === kind);
+    if (!editor || !element) return;
+
+    e.preventDefault();
+    e.stopPropagation();
+    e.currentTarget.setPointerCapture(e.pointerId);
+    setSelectedOverlayKind(kind);
+    overlayDragRef.current = {
+      kind,
+      mode,
+      startPoint: getNormalizedPointerWithin(e.clientX, e.clientY, editor),
+      startRect: { ...element.rect },
+    };
+  };
+
+  const handleOverlayPointerMove = (
+    e: React.PointerEvent<HTMLDivElement>,
+  ) => {
+    const drag = overlayDragRef.current;
+    const editor = overlayEditorRef.current;
+    if (!drag || !editor) return;
+
+    e.preventDefault();
+    const point = getNormalizedPointerWithin(e.clientX, e.clientY, editor);
+    const videoWidth = videoCanvas.current?.width ?? editor.clientWidth;
+    const videoHeight = videoCanvas.current?.height ?? editor.clientHeight;
+    const rect = applyOverlayDrag(
+      drag.kind,
+      drag.startRect,
+      drag.mode,
+      point.x - drag.startPoint.x,
+      point.y - drag.startPoint.y,
+      videoWidth,
+      videoHeight,
+    );
+    setOverlayLayout((current) =>
+      current.map((element) =>
+        element.kind === drag.kind ? { ...element, rect } : element,
+      ),
+    );
+  };
+
+  const finishOverlayDrag = () => {
+    overlayDragRef.current = null;
+  };
+
   const startMaskSelection = () => {
+    setLayoutEditing(false);
     setMaskEditing(true);
-    setOverlayVisible(false);
+    setPlayerControlsVisible(false);
   };
 
   const handleMaskPointerDown = (
@@ -358,6 +516,7 @@ export default function App() {
   };
 
   const updateStats = (s: Stats, e?: StatsEvent) => {
+    statsRef.current = s;
     setStats(s);
     setSeekValue(s.timestamp);
     const h = historyRef.current;
@@ -376,13 +535,16 @@ export default function App() {
       historyIndexRef.current = h.length - 1;
     }
     drawHistoryCharts();
+    drawPreviewOverlay();
   };
 
   const resetAnalysisHistory = () => {
     historyRef.current = [];
     historyIndexRef.current = -1;
+    statsRef.current = null;
     setStats(null);
     drawHistoryCharts();
+    drawPreviewOverlay();
   };
 
   function drawHistoryCharts() {
@@ -394,15 +556,53 @@ export default function App() {
       fpsCanvas.current,
       visibleHistory.map((x) => x.fps),
       fpsRangeRef.current,
-      "#159447",
+      FPS_COLOR,
       maxPoints,
     );
     drawChart(
       ftCanvas.current,
       visibleHistory.map((x) => x.ft),
       ftRangeRef.current,
-      "#0b8fb8",
+      FT_COLOR,
       maxPoints,
+    );
+  }
+
+  function drawPreviewOverlay() {
+    const canvas = overlayCanvas.current;
+    const video = videoCanvas.current;
+    if (!canvas || !video) return;
+
+    if (canvas.width !== video.width) canvas.width = video.width;
+    if (canvas.height !== video.height) canvas.height = video.height;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    const currentStats = statsRef.current;
+    if (
+      !currentStats ||
+      (!previewOverlayVisibleRef.current && !layoutEditingRef.current)
+    ) {
+      return;
+    }
+
+    drawOverlay(
+      ctx,
+      canvas.width,
+      canvas.height,
+      overlayLayoutRef.current,
+      {
+        history: historyRef.current,
+        historyIndex: historyIndexRef.current,
+        fps: currentStats.fps,
+      },
+      {
+        fpsRange: fpsRangeRef.current,
+        ftRange: ftRangeRef.current,
+        maxPoints: historyRangeRef.current.max,
+      },
+      { ghostHidden: layoutEditingRef.current },
     );
   }
 
@@ -493,8 +693,15 @@ export default function App() {
           <div>映像</div>
           <div ref={videoPanelRef} className="video-panel">
             <canvas ref={videoCanvas} />
+            <canvas
+              ref={overlayCanvas}
+              className="preview-overlay-canvas"
+              aria-hidden="true"
+            />
             <div
-              className={`mask-layer${maskEditing ? " is-editing" : ""}`}
+              className={`mask-layer${
+                maskEditing ? " is-editing" : ""
+              }`}
               onPointerDown={handleMaskPointerDown}
               onPointerMove={handleMaskPointerMove}
               onPointerUp={finishMaskSelection}
@@ -513,13 +720,63 @@ export default function App() {
                 />
               )}
             </div>
+            <div
+              ref={overlayEditorRef}
+              className={`overlay-editor-layer${
+                layoutEditing ? " is-editing" : ""
+              }`}
+              onPointerMove={handleOverlayPointerMove}
+              onPointerUp={finishOverlayDrag}
+              onPointerCancel={finishOverlayDrag}
+              aria-label="エクスポートオーバーレイの配置"
+            >
+              {layoutEditing &&
+                overlayLayout.map((element) => {
+                  const rect = getOverlayElementRect(
+                    element,
+                    videoCanvas.current?.width ?? 16,
+                    videoCanvas.current?.height ?? 9,
+                  );
+                  return (
+                    <div
+                      key={element.kind}
+                      className={`overlay-edit-box${
+                        selectedOverlayKind === element.kind
+                          ? " is-selected"
+                          : ""
+                      }${element.visible ? "" : " is-hidden-element"}`}
+                      style={{
+                        left: `${rect.x * 100}%`,
+                        top: `${rect.y * 100}%`,
+                        width: `${rect.width * 100}%`,
+                        height: `${rect.height * 100}%`,
+                      }}
+                      onPointerDown={(e) =>
+                        beginOverlayDrag(e, element.kind, "move")
+                      }
+                    >
+                      <span className="overlay-edit-label">
+                        {OVERLAY_ELEMENT_LABELS[element.kind]}
+                      </span>
+                      <button
+                        type="button"
+                        className="overlay-resize-handle"
+                        onPointerDown={(e) =>
+                          beginOverlayDrag(e, element.kind, "resize")
+                        }
+                        aria-label={`${OVERLAY_ELEMENT_LABELS[element.kind]}をリサイズ`}
+                      />
+                    </div>
+                  );
+                })}
+            </div>
             {seeking && (
               <div className="seek-loading" role="status" aria-label="シーク中">
                 <LoadingIcon />
               </div>
             )}
             <div
-              className={`video-overlay${overlayVisible ? "" : " is-hidden"}`}
+              className={`video-overlay${playerControlsVisible && !layoutEditing && !maskEditing ? "" : " is-hidden"}`}
             >
               <div className="player-controls">
                 <button
@@ -569,6 +826,55 @@ export default function App() {
                 </span>
               </label>
             </div>
+          </div>
+          <div className="overlay-settings" role="group" aria-label="エクスポートオーバーレイ設定">
+            <div className="overlay-settings-title">
+              エクスポートオーバーレイ
+            </div>
+            <label>
+              <input
+                type="checkbox"
+                checked={previewOverlayVisible}
+                onChange={(e) => setPreviewOverlayVisible(e.target.checked)}
+              />
+              プレビュー表示
+            </label>
+            {OVERLAY_ELEMENT_KINDS.map((kind) => {
+              const element = overlayLayout.find((item) => item.kind === kind);
+              return (
+                <label key={kind}>
+                  <input
+                    type="checkbox"
+                    checked={element?.visible ?? false}
+                    disabled={exporting}
+                    onChange={(e) =>
+                      setOverlayElementVisible(kind, e.target.checked)
+                    }
+                  />
+                  {OVERLAY_ELEMENT_LABELS[kind]}
+                </label>
+              );
+            })}
+            <button
+              type="button"
+              onClick={toggleLayoutEditor}
+              disabled={!stats || exporting || maskEditing}
+              aria-pressed={layoutEditing}
+            >
+              {layoutEditing ? "編集を終了" : "レイアウト編集"}
+            </button>
+            <button
+              type="button"
+              onClick={resetOverlayLayout}
+              disabled={exporting}
+            >
+              配置をリセット
+            </button>
+            {layoutEditing && (
+              <span className="overlay-edit-hint">
+                要素をドラッグして移動、右下のハンドルでサイズ変更
+              </span>
+            )}
           </div>
           <div className="panel-block">
             <div>差分</div>
@@ -854,10 +1160,18 @@ function clamp(v: number, min: number, max: number) {
 }
 
 function getNormalizedPointer(e: React.PointerEvent<HTMLElement>) {
-  const rect = e.currentTarget.getBoundingClientRect();
+  return getNormalizedPointerWithin(e.clientX, e.clientY, e.currentTarget);
+}
+
+function getNormalizedPointerWithin(
+  clientX: number,
+  clientY: number,
+  element: HTMLElement,
+) {
+  const rect = element.getBoundingClientRect();
   return {
-    x: clamp((e.clientX - rect.left) / rect.width, 0, 1),
-    y: clamp((e.clientY - rect.top) / rect.height, 0, 1),
+    x: clamp((clientX - rect.left) / rect.width, 0, 1),
+    y: clamp((clientY - rect.top) / rect.height, 0, 1),
   };
 }
 
@@ -908,75 +1222,22 @@ function isAbortError(error: unknown) {
 
 function drawChart(
   canvas: HTMLCanvasElement | null,
-  data: number[],
+  data: readonly number[],
   axisRange: AxisRange,
   color: string,
-  maxPoints: number = HISTORY_CAP,
+  maxPoints: number,
 ) {
   if (!canvas) return;
   const ctx = canvas.getContext("2d");
   if (!ctx) return;
-  const w = canvas.width;
-  const h = canvas.height;
-  const { min, max } = normalizeAxisRange(axisRange);
-  const plotLeft = 44;
-  const plotRight = w - 8;
-  const plotTop = 8;
-  const plotBottom = h - 20;
-  const plotWidth = Math.max(1, plotRight - plotLeft);
-  const plotHeight = Math.max(1, plotBottom - plotTop);
-
-  ctx.fillStyle = "#fff";
-  ctx.fillRect(0, 0, w, h);
-
-  ctx.strokeStyle = "#d8dee6";
-  ctx.lineWidth = 1;
-  ctx.fillStyle = "#4b5563";
-  ctx.font = "11px ui-monospace, monospace";
-  ctx.textAlign = "right";
-  ctx.textBaseline = "middle";
-
-  for (let i = 0; i <= 4; i++) {
-    const ratio = i / 4;
-    const y = plotBottom - ratio * plotHeight;
-    const label = formatAxisTick(min + (max - min) * ratio);
-    ctx.beginPath();
-    ctx.moveTo(plotLeft, y);
-    ctx.lineTo(plotRight, y);
-    ctx.stroke();
-    ctx.fillText(label, plotLeft - 6, y);
-  }
-
-  ctx.strokeStyle = "#9aa4b2";
-  ctx.beginPath();
-  ctx.moveTo(plotLeft, plotTop);
-  ctx.lineTo(plotLeft, plotBottom);
-  ctx.lineTo(plotRight, plotBottom);
-  ctx.stroke();
-
-  if (data.length < 2) return;
-
-  ctx.strokeStyle = color;
-  ctx.lineWidth = 1.5;
-  ctx.save();
-  ctx.beginPath();
-  ctx.rect(plotLeft, plotTop, plotWidth, plotHeight);
-  ctx.clip();
-  ctx.beginPath();
-  for (let i = 0; i < data.length; i++) {
-    const v = Math.max(min, Math.min(max, data[i]));
-    const x = plotLeft + (i / (maxPoints - 1)) * plotWidth;
-    const y = plotBottom - ((v - min) / (max - min)) * plotHeight;
-    if (i === 0) ctx.moveTo(x, y);
-    else ctx.lineTo(x, y);
-  }
-  ctx.stroke();
-  ctx.restore();
-}
-
-function formatAxisTick(value: number) {
-  if (Math.abs(value) >= 100 || Number.isInteger(value)) {
-    return value.toFixed(0);
-  }
-  return value.toFixed(1);
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  renderChart(
+    ctx,
+    { x: 0, y: 0, width: canvas.width, height: canvas.height },
+    data,
+    axisRange,
+    color,
+    maxPoints,
+    SCREEN_CHART_THEME,
+  );
 }

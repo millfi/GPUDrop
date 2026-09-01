@@ -159,10 +159,20 @@
                 max-width: 100%;
                 background: #000;
             }
+            .preview-overlay-canvas {
+                position: absolute;
+                inset: 0;
+                z-index: 1;
+                width: 100%;
+                height: 100%;
+                max-width: none;
+                background: transparent;
+                pointer-events: none;
+            }
             .mask-layer {
                 position: absolute;
                 inset: 0;
-                z-index: 2;
+                z-index: 3;
                 pointer-events: none;
                 touch-action: none;
             }
@@ -180,8 +190,98 @@
                     inset 0 0 0 1px rgb(255 255 255 / 35%);
                 pointer-events: none;
             }
+            .overlay-editor-layer {
+                position: absolute;
+                inset: 0;
+                z-index: 4;
+                pointer-events: none;
+                touch-action: none;
+                overflow: hidden;
+            }
+            .overlay-editor-layer.is-editing {
+                pointer-events: auto;
+            }
+            .overlay-edit-box {
+                position: absolute;
+                box-sizing: border-box;
+                border: 1px solid rgb(255 255 255 / 90%);
+                outline: 1px solid rgb(0 0 0 / 72%);
+                background: rgb(255 255 255 / 4%);
+                cursor: move;
+                user-select: none;
+            }
+            .overlay-edit-box.is-selected {
+                border: 2px solid #ffcc33;
+                outline-color: rgb(0 0 0 / 86%);
+                box-shadow: 0 0 0 2px rgb(255 204 51 / 24%);
+            }
+            .overlay-edit-box.is-hidden-element {
+                border-style: dashed;
+            }
+            .overlay-edit-label {
+                position: absolute;
+                top: 0;
+                left: 0;
+                max-width: calc(100% - 12px);
+                padding: 2px 5px;
+                overflow: hidden;
+                color: #fff;
+                background: rgb(0 0 0 / 74%);
+                font-size: 10px;
+                line-height: 1.2;
+                text-overflow: ellipsis;
+                white-space: nowrap;
+                pointer-events: none;
+            }
+            .overlay-resize-handle {
+                position: absolute;
+                right: -1px;
+                bottom: -1px;
+                width: 14px;
+                height: 14px;
+                min-width: 0;
+                padding: 0;
+                border: 1px solid rgb(0 0 0 / 82%);
+                border-radius: 2px 0 0;
+                background: #ffcc33;
+                cursor: nwse-resize;
+                touch-action: none;
+            }
+            .overlay-settings {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 8px 12px;
+                align-items: center;
+                margin-top: 8px;
+                padding: 8px;
+                border: 1px solid #d8dee6;
+                border-radius: 4px;
+                background: #f6f8fa;
+                font-size: 12px;
+            }
+            .overlay-settings-title {
+                flex-basis: 100%;
+                font-size: 13px;
+                font-weight: 700;
+            }
+            .overlay-settings label {
+                display: inline-flex;
+                gap: 5px;
+                align-items: center;
+                white-space: nowrap;
+            }
+            .overlay-settings input[type="checkbox"] {
+                margin: 0;
+                padding: 0;
+                accent-color: #159447;
+            }
+            .overlay-edit-hint {
+                flex-basis: 100%;
+                color: #5f6b7a;
+            }
             .video-overlay {
                 position: absolute;
+                z-index: 6;
                 left: 8px;
                 right: 8px;
                 bottom: 8px;
@@ -245,6 +345,7 @@
             }
             .seek-loading {
                 position: absolute;
+                z-index: 5;
                 top: 8px;
                 right: 8px;
                 width: 32px;

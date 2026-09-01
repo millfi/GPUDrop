@@ -191,6 +191,7 @@ export function applyOverlayDrag(
       ...startRect,
       x: clamp(startRect.x + dx, 0, Math.max(0, 1 - width)),
       y: clamp(startRect.y + dy, 0, Math.max(0, 1 - startRect.height)),
+      width,
     };
   }
   if (kind === "fpsValue") {
@@ -233,8 +234,11 @@ export function drawOverlay(
   axes: OverlayAxisSettings,
   options: { ghostHidden?: boolean } = {},
 ) {
-  const end = data.historyIndex + 1;
-  const start = Math.max(0, end - axes.maxPoints);
+  const maxPoints = Number.isFinite(axes.maxPoints)
+    ? Math.max(2, Math.floor(axes.maxPoints))
+    : 600;
+  const end = clamp(data.historyIndex + 1, 0, data.history.length);
+  const start = Math.max(0, end - maxPoints);
   const visibleHistory = data.history.slice(start, end);
 
   for (const element of layout) {
@@ -253,7 +257,7 @@ export function drawOverlay(
           visibleHistory.map((point) => point.fps),
           axes.fpsRange,
           FPS_COLOR,
-          axes.maxPoints,
+          maxPoints,
           OVERLAY_CHART_THEME,
           "FPS",
         );
@@ -265,7 +269,7 @@ export function drawOverlay(
           visibleHistory.map((point) => point.ft),
           axes.ftRange,
           FT_COLOR,
-          axes.maxPoints,
+          maxPoints,
           OVERLAY_CHART_THEME,
           "フレームタイム (ms)",
         );
@@ -275,11 +279,37 @@ export function drawOverlay(
   }
 }
 
-interface PixelRect {
+export interface PixelRect {
   x: number;
   y: number;
   width: number;
   height: number;
+}
+
+export function getOverlayElementRect(
+  element: OverlayElement,
+  videoWidth: number,
+  videoHeight: number,
+): NormalizedRect {
+  let height = clamp(element.rect.height, 0.01, 1);
+  let width =
+    element.kind === "fpsValue"
+      ? fpsValueNormalizedWidth(height, videoWidth, videoHeight)
+      : clamp(element.rect.width, 0.01, 1);
+
+  // Extremely narrow portrait videos can make a height-derived FPS panel
+  // wider than the frame. Scale both dimensions down to retain its aspect.
+  if (width > 1) {
+    height /= width;
+    width = 1;
+  }
+
+  return {
+    x: clamp(element.rect.x, 0, Math.max(0, 1 - width)),
+    y: clamp(element.rect.y, 0, Math.max(0, 1 - height)),
+    width,
+    height,
+  };
 }
 
 function toPixelRect(
@@ -287,16 +317,12 @@ function toPixelRect(
   width: number,
   height: number,
 ): PixelRect {
-  const heightPx = element.rect.height * height;
-  const widthPx =
-    element.kind === "fpsValue"
-      ? heightPx * FPS_VALUE_ASPECT
-      : element.rect.width * width;
+  const normalized = getOverlayElementRect(element, width, height);
   return {
-    x: element.rect.x * width,
-    y: element.rect.y * height,
-    width: Math.max(1, widthPx),
-    height: Math.max(1, heightPx),
+    x: normalized.x * width,
+    y: normalized.y * height,
+    width: Math.max(1, normalized.width * width),
+    height: Math.max(1, normalized.height * height),
   };
 }
 
@@ -344,6 +370,9 @@ export function renderChart(
   label?: string,
 ) {
   const { min, max } = sanitizeAxisRange(axisRange);
+  const pointCapacity = Number.isFinite(maxPoints)
+    ? Math.max(2, Math.floor(maxPoints))
+    : 600;
   const fontSize = clamp(Math.round(rect.height * 0.075), 9, 64);
   const plotLeft = rect.x + fontSize * 4;
   const plotRight = rect.x + rect.width - fontSize * 0.75;
@@ -401,7 +430,7 @@ export function renderChart(
   ctx.beginPath();
   for (let i = 0; i < data.length; i++) {
     const value = clamp(data[i], min, max);
-    const x = plotLeft + (i / (maxPoints - 1)) * plotWidth;
+    const x = plotLeft + (i / (pointCapacity - 1)) * plotWidth;
     const y = plotBottom - ((value - min) / (max - min)) * plotHeight;
     if (i === 0) ctx.moveTo(x, y);
     else ctx.lineTo(x, y);

@@ -10,6 +10,7 @@ import {
   StreamTarget,
   VideoSampleSink,
   canEncodeVideo,
+  type EncodedPacket,
   type InputAudioTrack,
   type StreamTargetChunk,
   type VideoCodec,
@@ -150,6 +151,18 @@ interface CodecCandidate {
   fullCodecString?: string;
 }
 
+interface AudioPassthroughPlan {
+  source: EncodedAudioPacketSource;
+  sink: EncodedPacketSink;
+  startPacket: EncodedPacket;
+  decoderConfig: AudioDecoderConfig | null;
+}
+
+interface AudioPassthroughPreparation {
+  plan: AudioPassthroughPlan | null;
+  skippedReason: string | null;
+}
+
 export class ExportCanceledError extends Error {
   constructor() {
     super("書き出しを中断しました");
@@ -157,7 +170,9 @@ export class ExportCanceledError extends Error {
   }
 }
 
-export async function exportOverlayVideo(options: ExportOptions) {
+export async function exportOverlayVideo(
+  options: ExportOptions,
+): Promise<ExportResult> {
   const source = new BlobSource(options.file, {
     maxCacheSize: 8 * 1024 * 1024,
   });
@@ -169,6 +184,8 @@ export async function exportOverlayVideo(options: ExportOptions) {
   const outputCanvas = document.createElement("canvas");
   let output: Output<Mp4OutputFormat, StreamTarget> | null = null;
   let canceling: Promise<void> | null = null;
+  let audioCopyPromise: Promise<void> | null = null;
+  let audioCopyError: unknown = null;
 
   const cancelOutput = () => {
     if (
@@ -229,27 +246,48 @@ export async function exportOverlayVideo(options: ExportOptions) {
       outputWidth,
       outputHeight,
     );
+    const outputFormat = new Mp4OutputFormat();
+    const audioPreparation = await prepareAudioPassthrough(
+      input,
+      outputFormat,
+      mediaStartTime,
+    );
     const exportTarget = await createExportTarget(options.file);
 
     throwIfAborted(options.signal);
     const canvasSource = new CanvasSource(outputCanvas, encodingConfig);
     output = new Output({
-      format: new Mp4OutputFormat(),
+      format: outputFormat,
       target: exportTarget.target,
     });
     output.addVideoTrack(canvasSource);
+    if (audioPreparation.plan) {
+      output.addAudioTrack(audioPreparation.plan.source);
+    }
     await output.start();
+    if (audioPreparation.plan) {
+      audioCopyPromise = copyAudioPackets(
+        audioPreparation.plan,
+        mediaStartTime,
+        endTime,
+        options.signal,
+      ).catch((error: unknown) => {
+        audioCopyError = error;
+      });
+    }
 
     const sampleSink = new VideoSampleSink(track);
-    const history: { fps: number; ft: number }[] = [];
-    const uniqueTimestamps: number[] = [];
+    const history: OverlayHistoryPoint[] = [];
+    const historyCapacity = Number.isFinite(options.historyMaxPoints)
+      ? Math.max(2, Math.floor(options.historyMaxPoints))
+      : 600;
+    const fpsEstimator = new FpsEstimator();
     let frameNumber = 0;
-    let previousUniqueTimestamp = 0;
-    let lastFrameTime = 0;
     let lastDuration = DEFAULT_FRAME_DURATION;
 
     for await (const sample of sampleSink.samples(mediaStartTime)) {
       throwIfAborted(options.signal);
+      if (audioCopyError) throw audioCopyError;
       const frame = sample.toVideoFrame();
       const sampleTimestamp = sample.timestamp;
       const relativeTimestamp = Math.max(0, sampleTimestamp - mediaStartTime);
@@ -266,57 +304,60 @@ export async function exportOverlayVideo(options: ExportOptions) {
           outputWidth,
           outputHeight,
         );
+        // Keep the live preview as an unmodified source frame. App.tsx draws
+        // the same overlay on its separate preview canvas, avoiding a double
+        // overlay while still matching the exported frame exactly.
+        displayCtx.clearRect(0, 0, outputWidth, outputHeight);
+        displayCtx.drawImage(outputCanvas, 0, 0);
 
         frameNumber++;
-        let diffCount = 0;
-        let isFirst = true;
         const result = await analyzer.compare(
           frame,
           options.threshold,
           options.mask,
         );
-        diffCount = result.diffCount;
-        isFirst = result.isFirst;
         frame.close();
 
-        if (isFirst) {
-          previousUniqueTimestamp = relativeTimestamp;
-          uniqueTimestamps.push(relativeTimestamp);
-        } else {
-          const ratio =
-            analyzedPixels > 0 ? diffCount / analyzedPixels : 0;
-          if (ratio <= options.frameThreshold) {
-            options.onDuplicate({
-              timestamp: relativeTimestamp,
-              frameNumber,
-            });
-          } else {
-            lastFrameTime = relativeTimestamp - previousUniqueTimestamp;
-            previousUniqueTimestamp = relativeTimestamp;
-            uniqueTimestamps.push(relativeTimestamp);
-          }
-        }
-
-        while (
-          uniqueTimestamps.length > 0 &&
-          uniqueTimestamps[0] <= relativeTimestamp - 1
-        ) {
-          uniqueTimestamps.shift();
+        const fpsSample = fpsEstimator.process({
+          tSec: relativeTimestamp,
+          diffCount: result.diffCount,
+          isFirst: result.isFirst,
+          analyzedPixels,
+          frameThreshold: options.frameThreshold,
+        });
+        if (fpsSample.isDuplicate) {
+          options.onDuplicate({
+            timestamp: relativeTimestamp,
+            frameNumber,
+          });
         }
 
         const stats = {
-          fps: uniqueTimestamps.length,
-          frameTime: lastFrameTime,
+          fps: fpsSample.fps,
+          frameTime: fpsSample.frameTime,
           timestamp: relativeTimestamp,
           frameNumber,
         };
         history.push({ fps: stats.fps, ft: stats.frameTime * 1000 });
-        drawExportCharts(outputCtx, outputWidth, outputHeight, history, {
-          fpsRange: options.fpsRange,
-          ftRange: options.ftRange,
-        });
-        displayCtx.clearRect(0, 0, outputWidth, outputHeight);
-        displayCtx.drawImage(outputCanvas, 0, 0);
+        if (history.length > historyCapacity) {
+          history.splice(0, history.length - historyCapacity);
+        }
+        drawOverlay(
+          outputCtx,
+          outputWidth,
+          outputHeight,
+          options.layout,
+          {
+            history,
+            historyIndex: history.length - 1,
+            fps: stats.fps,
+          },
+          {
+            fpsRange: options.fpsRange,
+            ftRange: options.ftRange,
+            maxPoints: historyCapacity,
+          },
+        );
         options.onStats(stats);
         options.onProgress({
           timestamp: relativeTimestamp,
@@ -337,6 +378,10 @@ export async function exportOverlayVideo(options: ExportOptions) {
     }
 
     throwIfAborted(options.signal);
+    canvasSource.close();
+    if (audioCopyPromise) await audioCopyPromise;
+    if (audioCopyError) throw audioCopyError;
+    throwIfAborted(options.signal);
     await output.finalize();
     const mimeType = await output.getMimeType();
     await exportTarget.complete(mimeType);
@@ -346,17 +391,117 @@ export async function exportOverlayVideo(options: ExportOptions) {
       progress: 1,
       codecLabel: encodingConfig.codecLabel,
     });
+    return { audioSkippedReason: audioPreparation.skippedReason };
   } catch (error) {
     if (options.signal.aborted || error instanceof ExportCanceledError) {
       await cancelOutput();
+      if (audioCopyPromise) await audioCopyPromise;
       throw new ExportCanceledError();
     }
     await cancelOutput();
+    if (audioCopyPromise) await audioCopyPromise;
     throw error;
   } finally {
     options.signal.removeEventListener("abort", handleAbort);
     analyzer.destroy();
     input.dispose();
+  }
+}
+
+async function prepareAudioPassthrough(
+  input: Input,
+  outputFormat: Mp4OutputFormat,
+  mediaStartTime: number,
+): Promise<AudioPassthroughPreparation> {
+  let track: InputAudioTrack | null;
+  try {
+    track = await input.getPrimaryAudioTrack();
+  } catch (error) {
+    return {
+      plan: null,
+      skippedReason: `音声トラックを読み取れません (${getErrorMessage(error)})`,
+    };
+  }
+  if (!track) return { plan: null, skippedReason: null };
+
+  try {
+    const codec = await track.getCodec();
+    const codecParameter = await track.getCodecParameterString();
+    const codecLabel = codecParameter ?? codec ?? "不明";
+    if (!codec) {
+      return {
+        plan: null,
+        skippedReason: `音声コーデックを判別できません (${codecLabel})`,
+      };
+    }
+    if (!outputFormat.getSupportedAudioCodecs().includes(codec)) {
+      return {
+        plan: null,
+        skippedReason: `MP4へコピーできない音声コーデックです (${codecLabel})`,
+      };
+    }
+
+    const sink = new EncodedPacketSink(track);
+    const packetAtStart = await sink.getPacket(mediaStartTime, {
+      skipLiveWait: true,
+    });
+    const startPacket =
+      packetAtStart ??
+      (await sink.getFirstPacket({
+        skipLiveWait: true,
+      }));
+    if (!startPacket) {
+      return {
+        plan: null,
+        skippedReason: "音声トラックにコピー可能なデータがありません",
+      };
+    }
+
+    return {
+      plan: {
+        source: new EncodedAudioPacketSource(codec),
+        sink,
+        startPacket,
+        decoderConfig: await track.getDecoderConfig(),
+      },
+      skippedReason: null,
+    };
+  } catch (error) {
+    return {
+      plan: null,
+      skippedReason: `音声のコピー準備に失敗しました (${getErrorMessage(error)})`,
+    };
+  }
+}
+
+async function copyAudioPackets(
+  plan: AudioPassthroughPlan,
+  mediaStartTime: number,
+  mediaEndTime: number,
+  signal: AbortSignal,
+) {
+  let isFirstOutputPacket = true;
+  try {
+    for await (const packet of plan.sink.packets(plan.startPacket, undefined, {
+      skipLiveWait: true,
+    })) {
+      throwIfAborted(signal);
+      if (packet.timestamp >= mediaEndTime) break;
+      if (packet.timestamp + packet.duration <= mediaStartTime) continue;
+
+      const shiftedPacket = packet.clone({
+        timestamp: packet.timestamp - mediaStartTime,
+      });
+      await plan.source.add(
+        shiftedPacket,
+        isFirstOutputPacket
+          ? { decoderConfig: plan.decoderConfig ?? undefined }
+          : undefined,
+      );
+      isFirstOutputPacket = false;
+    }
+  } finally {
+    plan.source.close();
   }
 }
 
@@ -483,89 +628,6 @@ function buildAvcHighCodecString(
   return `avc1.6400${level.level.toString(16).padStart(2, "0")}`;
 }
 
-function drawExportCharts(
-  ctx: CanvasRenderingContext2D,
-  width: number,
-  height: number,
-  history: { fps: number; ft: number }[],
-  options: { fpsRange: AxisRange; ftRange: AxisRange },
-) {
-  const visibleHistory = history.slice(Math.max(0, history.length - HISTORY_CAP));
-  const margin = clamp(Math.round(Math.min(width, height) * 0.025), 8, 28);
-  const gap = clamp(Math.round(height * 0.012), 6, 16);
-  const chartHeight = clamp(Math.round(height * 0.16), 54, 150);
-  const chartWidth = Math.max(1, width - margin * 2);
-  const top = Math.max(margin, height - margin - chartHeight * 2 - gap);
-  const ftRect = {
-    x: margin,
-    y: top,
-    width: chartWidth,
-    height: chartHeight,
-  };
-  const fpsRect = {
-    x: margin,
-    y: top + chartHeight + gap,
-    width: chartWidth,
-    height: chartHeight,
-  };
-
-  drawTransparentChart(
-    ctx,
-    ftRect,
-    visibleHistory.map((item) => item.ft),
-    options.ftRange,
-  );
-  drawTransparentChart(
-    ctx,
-    fpsRect,
-    visibleHistory.map((item) => item.fps),
-    options.fpsRange,
-  );
-}
-
-function drawTransparentChart(
-  ctx: CanvasRenderingContext2D,
-  rect: { x: number; y: number; width: number; height: number },
-  data: number[],
-  axisRange: AxisRange,
-) {
-  const { min, max } = normalizeAxisRange(axisRange);
-  const plotLeft = rect.x;
-  const plotRight = rect.x + rect.width;
-  const plotTop = rect.y;
-  const plotBottom = rect.y + rect.height;
-  const plotWidth = Math.max(1, plotRight - plotLeft);
-  const plotHeight = Math.max(1, plotBottom - plotTop);
-
-  ctx.save();
-  ctx.strokeStyle = "#FFFFFF";
-  ctx.lineCap = "round";
-  ctx.lineJoin = "round";
-  ctx.lineWidth = Math.max(1.5, Math.min(rect.width, rect.height) / 95);
-  ctx.beginPath();
-  ctx.moveTo(plotLeft, plotTop);
-  ctx.lineTo(plotLeft, plotBottom);
-  ctx.lineTo(plotRight, plotBottom);
-  ctx.stroke();
-
-  if (data.length >= 2) {
-    ctx.beginPath();
-    ctx.rect(plotLeft, plotTop, plotWidth, plotHeight);
-    ctx.clip();
-    ctx.beginPath();
-    for (let i = 0; i < data.length; i++) {
-      const value = clamp(data[i], min, max);
-      const x = plotLeft + (i / (HISTORY_CAP - 1)) * plotWidth;
-      const y = plotBottom - ((value - min) / (max - min)) * plotHeight;
-      if (i === 0) ctx.moveTo(x, y);
-      else ctx.lineTo(x, y);
-    }
-    ctx.stroke();
-  }
-
-  ctx.restore();
-}
-
 async function createExportTarget(file: File): Promise<ExportTargetInfo> {
   const fileName = createExportFileName(file.name);
   const picker = (
@@ -646,13 +708,6 @@ function createExportFileName(fileName: string) {
   return `${base || "video"}-overlay.mp4`;
 }
 
-function normalizeAxisRange(range: AxisRange) {
-  const min = Number.isFinite(range.min) ? range.min : 0;
-  const max = Number.isFinite(range.max) ? range.max : min + 1;
-  if (max - min >= 1) return { min, max };
-  return { min, max: min + 1 };
-}
-
 function required2dContext(canvas: HTMLCanvasElement) {
   const context = canvas.getContext("2d");
   if (!context) throw new Error("2D canvas contextを取得できません");
@@ -666,6 +721,10 @@ function roundUpToEven(value: number) {
 function clamp(value: number, min: number, max: number) {
   if (max < min) return min;
   return Math.max(min, Math.min(max, value));
+}
+
+function getErrorMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function throwIfAborted(signal: AbortSignal) {
