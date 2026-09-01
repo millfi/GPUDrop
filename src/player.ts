@@ -19,6 +19,7 @@ import {
   getAnalyzedPixelCount,
   type RectMask,
 } from "./analyzer";
+import { t } from "./i18n";
 
 const FRAME_SNAPSHOT_CACHE_SIZE = 120;
 const PREVIOUS_SAMPLE_EPSILON = 1e-9;
@@ -337,11 +338,16 @@ export class Player {
       });
 
       const track = await this.input.getPrimaryVideoTrack();
-      if (!track) throw new Error("動画トラックがありません");
+      if (!track) {
+        throw new Error(t("動画トラックがありません", "No video track found"));
+      }
       if (!(await track.canDecode())) {
         const codec = await track.getCodecParameterString();
         throw new Error(
-          `このブラウザでは動画コーデックをデコードできません${codec ? ` (${codec})` : ""}`,
+          t(
+            `このブラウザでは動画コーデックをデコードできません${codec ? ` (${codec})` : ""}`,
+            `This browser cannot decode the video codec${codec ? ` (${codec})` : ""}`,
+          ),
         );
       }
       this.mediaStartTime = await track.getFirstTimestamp();
@@ -785,7 +791,12 @@ export class Player {
 
     const record = this.frameRecords[recordIndex];
     if (!record)
-      throw new Error(`フレーム履歴が見つかりません: ${recordIndex}`);
+      throw new Error(
+        t(
+          `フレーム履歴が見つかりません: ${recordIndex}`,
+          `Frame history not found: ${recordIndex}`,
+        ),
+      );
 
     const image = await this.decodeFrameImage(recordIndex);
     const snapshot = { image };
@@ -833,13 +844,21 @@ export class Player {
     const sink = this.sampleSink;
     const record = this.frameRecords[recordIndex];
     if (!sink || !record) {
-      throw new Error(`フレームを復元できません: ${recordIndex}`);
+      throw new Error(
+        t(
+          `フレームを復元できません: ${recordIndex}`,
+          `Could not restore frame: ${recordIndex}`,
+        ),
+      );
     }
 
     const sample = await sink.getSample(record.sampleTimestamp);
     if (!sample) {
       throw new Error(
-        `動画サンプルを取得できません: ${record.stats.timestamp.toFixed(3)}s`,
+        t(
+          `動画サンプルを取得できません: ${record.stats.timestamp.toFixed(3)}s`,
+          `Could not retrieve video sample: ${record.stats.timestamp.toFixed(3)}s`,
+        ),
       );
     }
 

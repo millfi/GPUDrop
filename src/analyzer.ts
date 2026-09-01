@@ -10,6 +10,8 @@
 // `prevTex` and `currTex` are swapped after each compare() to avoid copying
 // the same VideoFrame twice.
 
+import { t } from "./i18n";
+
 export interface RectMask {
   x: number;
   y: number;
@@ -116,9 +118,20 @@ export class Analyzer {
   private workChain: Promise<void> = Promise.resolve();
 
   async init(width: number, height: number, diffCanvas: HTMLCanvasElement) {
-    if (!navigator.gpu) throw new Error("このブラウザは WebGPU 非対応です");
+    if (!navigator.gpu) {
+      throw new Error(
+        t(
+          "このブラウザは WebGPU 非対応です",
+          "This browser does not support WebGPU",
+        ),
+      );
+    }
     const adapter = await navigator.gpu.requestAdapter();
-    if (!adapter) throw new Error("GPU アダプタを取得できません");
+    if (!adapter) {
+      throw new Error(
+        t("GPU アダプタを取得できません", "Could not obtain a GPU adapter"),
+      );
+    }
     this.device = await adapter.requestDevice();
     this.w = width;
     this.h = height;

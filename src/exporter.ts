@@ -22,6 +22,7 @@ import {
   type RectMask,
 } from "./analyzer";
 import { FpsEstimator, type DupEvent, type Stats } from "./player";
+import { t } from "./i18n";
 import {
   drawOverlay,
   type AxisRange,
@@ -165,7 +166,7 @@ interface AudioPassthroughPreparation {
 
 export class ExportCanceledError extends Error {
   constructor() {
-    super("書き出しを中断しました");
+    super(t("書き出しを中断しました", "Export was canceled"));
     this.name = "ExportCanceledError";
   }
 }
@@ -208,11 +209,16 @@ export async function exportOverlayVideo(
   try {
     throwIfAborted(options.signal);
     const track = await input.getPrimaryVideoTrack();
-    if (!track) throw new Error("動画トラックがありません");
+    if (!track) {
+      throw new Error(t("動画トラックがありません", "No video track found"));
+    }
     if (!(await track.canDecode())) {
       const codec = await track.getCodecParameterString();
       throw new Error(
-        `このブラウザでは動画コーデックをデコードできません${codec ? ` (${codec})` : ""}`,
+        t(
+          `このブラウザでは動画コーデックをデコードできません${codec ? ` (${codec})` : ""}`,
+          `This browser cannot decode the video codec${codec ? ` (${codec})` : ""}`,
+        ),
       );
     }
 
@@ -419,7 +425,10 @@ async function prepareAudioPassthrough(
   } catch (error) {
     return {
       plan: null,
-      skippedReason: `音声トラックを読み取れません (${getErrorMessage(error)})`,
+      skippedReason: t(
+        `音声トラックを読み取れません (${getErrorMessage(error)})`,
+        `Could not read the audio track (${getErrorMessage(error)})`,
+      ),
     };
   }
   if (!track) return { plan: null, skippedReason: null };
@@ -427,17 +436,23 @@ async function prepareAudioPassthrough(
   try {
     const codec = await track.getCodec();
     const codecParameter = await track.getCodecParameterString();
-    const codecLabel = codecParameter ?? codec ?? "不明";
+    const codecLabel = codecParameter ?? codec ?? t("不明", "unknown");
     if (!codec) {
       return {
         plan: null,
-        skippedReason: `音声コーデックを判別できません (${codecLabel})`,
+        skippedReason: t(
+          `音声コーデックを判別できません (${codecLabel})`,
+          `Could not identify the audio codec (${codecLabel})`,
+        ),
       };
     }
     if (!outputFormat.getSupportedAudioCodecs().includes(codec)) {
       return {
         plan: null,
-        skippedReason: `MP4へコピーできない音声コーデックです (${codecLabel})`,
+        skippedReason: t(
+          `MP4へコピーできない音声コーデックです (${codecLabel})`,
+          `The audio codec cannot be copied to MP4 (${codecLabel})`,
+        ),
       };
     }
 
@@ -453,7 +468,10 @@ async function prepareAudioPassthrough(
     if (!startPacket) {
       return {
         plan: null,
-        skippedReason: "音声トラックにコピー可能なデータがありません",
+        skippedReason: t(
+          "音声トラックにコピー可能なデータがありません",
+          "The audio track contains no copyable data",
+        ),
       };
     }
 
@@ -469,7 +487,10 @@ async function prepareAudioPassthrough(
   } catch (error) {
     return {
       plan: null,
-      skippedReason: `音声のコピー準備に失敗しました (${getErrorMessage(error)})`,
+      skippedReason: t(
+        `音声のコピー準備に失敗しました (${getErrorMessage(error)})`,
+        `Could not prepare audio passthrough (${getErrorMessage(error)})`,
+      ),
     };
   }
 }
@@ -532,7 +553,12 @@ async function selectEncodingConfig(width: number, height: number) {
     }
   }
 
-  throw new Error("この環境で利用できる書き出し用動画コーデックがありません");
+  throw new Error(
+    t(
+      "この環境で利用できる書き出し用動画コーデックがありません",
+      "No video codec is available for export in this environment",
+    ),
+  );
 }
 
 function buildCodecCandidates(width: number, height: number): CodecCandidate[] {
@@ -710,7 +736,14 @@ function createExportFileName(fileName: string) {
 
 function required2dContext(canvas: HTMLCanvasElement) {
   const context = canvas.getContext("2d");
-  if (!context) throw new Error("2D canvas contextを取得できません");
+  if (!context) {
+    throw new Error(
+      t(
+        "2D canvas contextを取得できません",
+        "Could not obtain a 2D canvas context",
+      ),
+    );
+  }
   return context;
 }
 

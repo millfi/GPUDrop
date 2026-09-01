@@ -6,6 +6,7 @@ import {
 } from "./exporter";
 import { Player, type Stats, type DupEvent, type StatsEvent } from "./player";
 import type { RectMask } from "./analyzer";
+import { t } from "./i18n";
 import {
   FPS_COLOR,
   FT_COLOR,
@@ -45,9 +46,9 @@ const ACCEPTED_MEDIA_TYPES = [
 ].join(",");
 
 const OVERLAY_ELEMENT_LABELS: Record<OverlayElementKind, string> = {
-  fpsValue: "FPS 数値",
-  fpsChart: "FPS グラフ",
-  ftChart: "フレームタイム グラフ",
+  fpsValue: t("FPS 数値", "FPS Value"),
+  fpsChart: t("FPS グラフ", "FPS Graph"),
+  ftChart: t("フレームタイム グラフ", "Frame Time Graph"),
 };
 
 interface OverlayDragState {
@@ -68,7 +69,7 @@ export default function App() {
   const [duration, setDuration] = useState(0);
   const [seekValue, setSeekValue] = useState(0);
   const [playerControlsVisible, setPlayerControlsVisible] = useState(true);
-  const [previewOverlayVisible, setPreviewOverlayVisible] = useState(true);
+  const [previewOverlayVisible, setPreviewOverlayVisible] = useState(false);
   const [layoutEditing, setLayoutEditing] = useState(false);
   const [selectedOverlayKind, setSelectedOverlayKind] =
     useState<OverlayElementKind>("fpsValue");
@@ -367,14 +368,21 @@ export default function App() {
         },
       });
       const audioNote = result.audioSkippedReason
-        ? ` — 音声なし: ${result.audioSkippedReason}`
+        ? t(
+            ` — 音声なし: ${result.audioSkippedReason}`,
+            ` — No audio: ${result.audioSkippedReason}`,
+          )
         : "";
       setExportMessage(
-        `書き出し完了${progressSummary.codecLabel ? ` (${progressSummary.codecLabel})` : ""}${audioNote}`,
+        `${t("書き出し完了", "Export complete")}${
+          progressSummary.codecLabel
+            ? ` (${progressSummary.codecLabel})`
+            : ""
+        }${audioNote}`,
       );
     } catch (e) {
       if (e instanceof ExportCanceledError || isAbortError(e)) {
-        setExportMessage("書き出し中断");
+        setExportMessage(t("書き出し中断", "Export canceled"));
       } else {
         console.error(e);
         alert((e as Error).message);
@@ -609,7 +617,7 @@ export default function App() {
   return (
     <div>
       <GlassFilterDefs />
-      <h1>FPS推定</h1>
+      <h1>{t("FPS推定", "FPS Estimator")}</h1>
       <div className="controls">
         <input
           ref={fileInputRef}
@@ -619,7 +627,7 @@ export default function App() {
           onChange={handleFileChange}
         />
         <label>
-          ピクセル閾値: {threshold.toFixed(3)}
+          {t("ピクセル閾値", "Pixel threshold")}: {threshold.toFixed(3)}
           <input
             type="range"
             min={0}
@@ -635,7 +643,9 @@ export default function App() {
           onClick={startMaskSelection}
           disabled={!stats || exporting || maskEditing}
         >
-          {mask ? "マスクを再選択" : "マスク範囲を選択"}
+          {mask
+            ? t("マスクを再選択", "Reselect mask")
+            : t("マスク範囲を選択", "Select mask area")}
         </button>
         {mask && (
           <button
@@ -643,12 +653,18 @@ export default function App() {
             onClick={() => setMask(null)}
             disabled={!stats || exporting}
           >
-            マスク解除
+            {t("マスク解除", "Clear mask")}
           </button>
         )}
-        {maskEditing && <span>映像上をドラッグしてください</span>}
+        {maskEditing && (
+          <span>
+            {t("映像上をドラッグしてください", "Drag over the video")}
+          </span>
+        )}
         <label>
-          フレーム閾値: {(frameThreshold * 100).toFixed(3)}%
+          {t("フレーム閾値", "Frame threshold")}: {(
+            frameThreshold * 100
+          ).toFixed(3)}%
           <input
             type="range"
             min={0}
@@ -660,14 +676,20 @@ export default function App() {
           />
         </label>
         <button onClick={start} disabled={!file || running || exporting}>
-          開始
+          {t("開始", "Start")}
         </button>
         <button onClick={startExport} disabled={!file || running || exporting}>
-          Export
+          {t("エクスポート", "Export")}
         </button>
-        {exporting && <button onClick={cancelExport}>中断</button>}
-        {running && <span>{paused ? "一時停止中" : "再生中…"}</span>}
-        {exporting && <span>書き出し中…</span>}
+        {exporting && (
+          <button onClick={cancelExport}>{t("中断", "Cancel")}</button>
+        )}
+        {running && (
+          <span>
+            {paused ? t("一時停止中", "Paused") : t("再生中…", "Playing…")}
+          </span>
+        )}
+        {exporting && <span>{t("書き出し中…", "Exporting…")}</span>}
       </div>
 
       <div className="stats">
@@ -677,8 +699,8 @@ export default function App() {
       </div>
       <div className="stats">
         {stats
-          ? `現在値: fps=${stats.fps}  frameTime=${(stats.frameTime * 1000).toFixed(2)}ms`
-          : "現在値: —"}
+          ? `${t("現在値", "Current")}: fps=${stats.fps}  ${t("フレームタイム", "frameTime")}=${(stats.frameTime * 1000).toFixed(2)}ms`
+          : `${t("現在値", "Current")}: —`}
       </div>
       {(exporting || exportMessage) && (
         <div className="stats">
@@ -690,7 +712,7 @@ export default function App() {
 
       <div className="grid">
         <div className="media-column">
-          <div>映像</div>
+          <div>{t("映像", "Video")}</div>
           <div ref={videoPanelRef} className="video-panel">
             <canvas ref={videoCanvas} />
             <canvas
@@ -706,7 +728,10 @@ export default function App() {
               onPointerMove={handleMaskPointerMove}
               onPointerUp={finishMaskSelection}
               onPointerCancel={finishMaskSelection}
-              aria-label="差分判定から除外する領域"
+              aria-label={t(
+                "差分判定から除外する領域",
+                "Area excluded from difference detection",
+              )}
             >
               {mask && (
                 <div
@@ -728,7 +753,10 @@ export default function App() {
               onPointerMove={handleOverlayPointerMove}
               onPointerUp={finishOverlayDrag}
               onPointerCancel={finishOverlayDrag}
-              aria-label="エクスポートオーバーレイの配置"
+              aria-label={t(
+                "エクスポートオーバーレイの配置",
+                "Export overlay layout",
+              )}
             >
               {layoutEditing &&
                 overlayLayout.map((element) => {
@@ -764,14 +792,21 @@ export default function App() {
                         onPointerDown={(e) =>
                           beginOverlayDrag(e, element.kind, "resize")
                         }
-                        aria-label={`${OVERLAY_ELEMENT_LABELS[element.kind]}をリサイズ`}
+                        aria-label={t(
+                          `${OVERLAY_ELEMENT_LABELS[element.kind]}をリサイズ`,
+                          `Resize ${OVERLAY_ELEMENT_LABELS[element.kind]}`,
+                        )}
                       />
                     </div>
                   );
                 })}
             </div>
             {seeking && (
-              <div className="seek-loading" role="status" aria-label="シーク中">
+              <div
+                className="seek-loading"
+                role="status"
+                aria-label={t("シーク中", "Seeking")}
+              >
                 <LoadingIcon />
               </div>
             )}
@@ -784,8 +819,8 @@ export default function App() {
                   className="icon-button"
                   onClick={stepBackward}
                   disabled={exporting}
-                  title="1フレーム戻る"
-                  aria-label="1フレーム戻る"
+                  title={t("1フレーム戻る", "Previous frame")}
+                  aria-label={t("1フレーム戻る", "Previous frame")}
                 >
                   <StepBackIcon />
                 </button>
@@ -794,8 +829,12 @@ export default function App() {
                   className="icon-button"
                   onClick={togglePlayback}
                   disabled={exporting}
-                  title={paused ? "再生" : "一時停止"}
-                  aria-label={paused ? "再生" : "一時停止"}
+                  title={
+                    paused ? t("再生", "Play") : t("一時停止", "Pause")
+                  }
+                  aria-label={
+                    paused ? t("再生", "Play") : t("一時停止", "Pause")
+                  }
                 >
                   {paused ? <PlayIcon /> : <PauseIcon />}
                 </button>
@@ -804,8 +843,8 @@ export default function App() {
                   className="icon-button"
                   onClick={stepForward}
                   disabled={exporting}
-                  title="1フレーム進む"
-                  aria-label="1フレーム進む"
+                  title={t("1フレーム進む", "Next frame")}
+                  aria-label={t("1フレーム進む", "Next frame")}
                 >
                   <StepForwardIcon />
                 </button>
@@ -819,7 +858,7 @@ export default function App() {
                   value={Math.min(seekValue, duration || 0)}
                   disabled={exporting || duration <= 0}
                   onChange={(e) => seek(parseFloat(e.target.value))}
-                  aria-label="シーク"
+                  aria-label={t("シーク", "Seek")}
                 />
                 <span>
                   {formatTime(seekValue)} / {formatTime(duration)}
@@ -827,9 +866,16 @@ export default function App() {
               </label>
             </div>
           </div>
-          <div className="overlay-settings" role="group" aria-label="エクスポートオーバーレイ設定">
+          <div
+            className="overlay-settings"
+            role="group"
+            aria-label={t(
+              "エクスポートオーバーレイ設定",
+              "Export overlay settings",
+            )}
+          >
             <div className="overlay-settings-title">
-              エクスポートオーバーレイ
+              {t("エクスポートオーバーレイ", "Export Overlay")}
             </div>
             <label>
               <input
@@ -837,7 +883,7 @@ export default function App() {
                 checked={previewOverlayVisible}
                 onChange={(e) => setPreviewOverlayVisible(e.target.checked)}
               />
-              プレビュー表示
+              {t("プレビュー表示", "Show preview")}
             </label>
             {OVERLAY_ELEMENT_KINDS.map((kind) => {
               const element = overlayLayout.find((item) => item.kind === kind);
@@ -861,23 +907,28 @@ export default function App() {
               disabled={!stats || exporting || maskEditing}
               aria-pressed={layoutEditing}
             >
-              {layoutEditing ? "編集を終了" : "レイアウト編集"}
+              {layoutEditing
+                ? t("編集を終了", "Finish editing")
+                : t("レイアウト編集", "Edit layout")}
             </button>
             <button
               type="button"
               onClick={resetOverlayLayout}
               disabled={exporting}
             >
-              配置をリセット
+              {t("配置をリセット", "Reset layout")}
             </button>
             {layoutEditing && (
               <span className="overlay-edit-hint">
-                要素をドラッグして移動、右下のハンドルでサイズ変更
+                {t(
+                  "要素をドラッグして移動、右下のハンドルでサイズ変更",
+                  "Drag elements to move; use the bottom-right handle to resize",
+                )}
               </span>
             )}
           </div>
           <div className="panel-block">
-            <div>差分</div>
+            <div>{t("差分", "Difference")}</div>
             <canvas ref={diffCanvas} />
           </div>
         </div>
@@ -894,16 +945,22 @@ export default function App() {
               height={150}
             />
             <AxisRangeControl
-              title="FPS 縦軸レンジ"
-              description="このグラフの左軸に表示する値の範囲"
+              title={t("FPS 縦軸レンジ", "FPS Y-axis range")}
+              description={t(
+                "このグラフの左軸に表示する値の範囲",
+                "Range shown on the left axis of this graph",
+              )}
               value={fpsRange}
               limits={FPS_AXIS_LIMITS}
               step={1}
               onChange={setFpsRange}
             />
             <AxisRangeControl
-              title="横軸レンジ"
-              description="表示する履歴データポイント数（最大フレーム数）"
+              title={t("横軸レンジ", "X-axis range")}
+              description={t(
+                "表示する履歴データポイント数（最大フレーム数）",
+                "Number of history data points to show (maximum frames)",
+              )}
               value={historyRange}
               limits={HISTORY_AXIS_LIMITS}
               step={10}
@@ -912,7 +969,8 @@ export default function App() {
           </div>
           <div className="chart-panel">
             <div className="chart-title">
-              フレームタイム (ms, {ftRange.min}–{ftRange.max})
+              {t("フレームタイム", "Frame Time")} (ms, {ftRange.min}–
+              {ftRange.max})
             </div>
             <canvas
               ref={ftCanvas}
@@ -921,16 +979,25 @@ export default function App() {
               height={150}
             />
             <AxisRangeControl
-              title="フレームタイム 縦軸レンジ"
-              description="このグラフの左軸に表示する値の範囲"
+              title={t(
+                "フレームタイム 縦軸レンジ",
+                "Frame Time Y-axis range",
+              )}
+              description={t(
+                "このグラフの左軸に表示する値の範囲",
+                "Range shown on the left axis of this graph",
+              )}
               value={ftRange}
               limits={FT_AXIS_LIMITS}
               step={1}
               onChange={setFtRange}
             />
             <AxisRangeControl
-              title="横軸レンジ"
-              description="表示する履歴データポイント数（最大フレーム数）"
+              title={t("横軸レンジ", "X-axis range")}
+              description={t(
+                "表示する履歴データポイント数（最大フレーム数）",
+                "Number of history data points to show (maximum frames)",
+              )}
               value={historyRange}
               limits={HISTORY_AXIS_LIMITS}
               step={10}
@@ -940,7 +1007,12 @@ export default function App() {
         </div>
 
         <div className="events-column">
-          <div>同一フレーム検知 ({events.length}件)</div>
+          <div>
+            {t(
+              `同一フレーム検知 (${events.length}件)`,
+              `Duplicate Frames (${events.length})`,
+            )}
+          </div>
           <div className="events">
             {events.map((e, i) => (
               <button
@@ -949,7 +1021,10 @@ export default function App() {
                 className="event-link"
                 disabled={exporting}
                 onClick={() => seekToDuplicateEvent(e.timestamp)}
-                title={`${e.timestamp.toFixed(3)}s にシーク`}
+                title={t(
+                  `${e.timestamp.toFixed(3)}s にシーク`,
+                  `Seek to ${e.timestamp.toFixed(3)}s`,
+                )}
               >
                 t = {e.timestamp.toFixed(3)}s · frame #{e.frameNumber}
               </button>
@@ -1059,7 +1134,7 @@ function AxisRangeControl({
           onChange={(e) =>
             applyRange({ ...normalized, max: parseFloat(e.target.value) })
           }
-          aria-label={`${title} 最大値`}
+          aria-label={t(`${title} 最大値`, `${title} maximum`)}
         />
         <div className="axis-range-inputs">
           <input
@@ -1072,7 +1147,7 @@ function AxisRangeControl({
             onChange={(e) =>
               applyRange({ ...normalized, min: parseFloat(e.target.value) })
             }
-            aria-label={`${title} 最小値`}
+            aria-label={t(`${title} 最小値`, `${title} minimum`)}
           />
           <input
             className="axis-number"
@@ -1084,7 +1159,7 @@ function AxisRangeControl({
             onChange={(e) =>
               applyRange({ ...normalized, max: parseFloat(e.target.value) })
             }
-            aria-label={`${title} 最大値`}
+            aria-label={t(`${title} 最大値`, `${title} maximum`)}
           />
         </div>
       </div>

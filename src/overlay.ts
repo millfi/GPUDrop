@@ -3,6 +3,8 @@
 // video frame, so one layout definition applies to the scaled-down preview
 // canvas and to the full-resolution export canvas alike.
 
+import { t } from "./i18n";
+
 export interface AxisRange {
   min: number;
   max: number;
@@ -271,7 +273,7 @@ export function drawOverlay(
           FT_COLOR,
           maxPoints,
           OVERLAY_CHART_THEME,
-          "フレームタイム (ms)",
+          t("フレームタイム (ms)", "Frame Time (ms)"),
         );
         break;
     }
