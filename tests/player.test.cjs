@@ -41,7 +41,7 @@ test('real playback pipeline loads one frame, steps both ways, resumes and stops
   });
   const player = new Player({
     file: {}, videoCanvas: { getContext: () => ({ drawImage() {} }) }, diffCanvas: {},
-    threshold: 0.05, frameThreshold: 0.001, mask: null,
+    threshold: 0.05, frameThreshold: 0.001, masks: [],
     onStats: s => stats.push(s), onDuplicate() {}, onPausedChange: value => paused.push(value),
   });
   const playback = player.start();

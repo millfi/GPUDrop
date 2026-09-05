@@ -106,7 +106,7 @@ interface Options {
   diffCanvas: HTMLCanvasElement;
   threshold: number; // per-pixel linearRGB distance threshold
   frameThreshold: number; // ratio of differing pixels to total pixels above which the frame is considered "different"
-  mask: RectMask | null;
+  masks: readonly RectMask[];
   onStats: (s: Stats, e?: StatsEvent) => void;
   onDuplicate: (e: DupEvent) => void;
   onEnd?: () => void;
@@ -121,7 +121,7 @@ interface FrameSnapshot {
 interface FrameRecord {
   sampleTimestamp: number;
   diffThreshold: number;
-  mask: RectMask | null;
+  masks: readonly RectMask[];
   stats: Stats;
 }
 
@@ -151,7 +151,7 @@ export class Player {
   private sampleSink: VideoSampleSink | null = null;
   private threshold: number;
   private frameThreshold: number;
-  private mask: RectMask | null;
+  private masks: readonly RectMask[];
   private totalPixels = 0;
   private stopped = false;
   private mediaStartTime = 0;
@@ -191,7 +191,7 @@ export class Player {
     this.opts = opts;
     this.threshold = opts.threshold;
     this.frameThreshold = opts.frameThreshold;
-    this.mask = opts.mask;
+    this.masks = opts.masks;
   }
 
   setThreshold(t: number) {
@@ -202,8 +202,8 @@ export class Player {
     this.frameThreshold = t;
   }
 
-  setMask(mask: RectMask | null) {
-    this.mask = mask;
+  setMasks(masks: readonly RectMask[]) {
+    this.masks = masks;
   }
 
   pause() {
@@ -526,7 +526,7 @@ export class Player {
         const r = await this.analyzer.compare(
           frame,
           this.threshold,
-          this.mask,
+          this.masks,
         );
         diffCount = r.diffCount;
         isFirst = r.isFirst;
@@ -543,7 +543,7 @@ export class Player {
       const recordIndex = this.pushRecord({
         sampleTimestamp,
         diffThreshold: this.threshold,
-        mask: this.mask ? { ...this.mask } : null,
+        masks: this.masks.map(mask => ({ ...mask })),
         stats,
       });
       this.cacheSnapshot(recordIndex, {
@@ -725,7 +725,7 @@ export class Player {
     notifyDuplicate: boolean,
   ): Stats {
     const analyzedPixels = getAnalyzedPixelCount(
-      this.mask,
+      this.masks,
       this.opts.videoCanvas.width,
       this.opts.videoCanvas.height,
     );
@@ -830,7 +830,7 @@ export class Player {
         prevSnapshot.image,
         snapshot.image,
         record.diffThreshold,
-        record.mask,
+        record.masks,
       );
       return;
     }
@@ -841,7 +841,7 @@ export class Player {
         prevImage,
         snapshot.image,
         record.diffThreshold,
-        record.mask,
+        record.masks,
       );
     } finally {
       prevImage.close();

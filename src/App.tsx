@@ -5,7 +5,7 @@ import {
   type ExportProgress,
 } from "./exporter";
 import { Player, type Stats, type DupEvent, type StatsEvent } from "./player";
-import type { RectMask } from "./analyzer";
+import { getAnalyzedPixelCount, type RectMask } from "./analyzer";
 import { t } from "./i18n";
 import {
   FPS_COLOR,
@@ -62,7 +62,9 @@ export default function App() {
   const [file, setFile] = useState<File | null>(null);
   const [threshold, setThreshold] = useState(0.05);
   const [frameThreshold, setFrameThreshold] = useState(0.0006);
-  const [mask, setMask] = useState<RectMask | null>(null);
+  const [masks, setMasks] = useState<RectMask[]>([]);
+  const [draftMask, setDraftMask] = useState<RectMask | null>(null);
+  const [maskMessage, setMaskMessage] = useState("");
   const [maskEditing, setMaskEditing] = useState(false);
   const [running, setRunning] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -121,8 +123,8 @@ export default function App() {
   }, [frameThreshold]);
 
   useEffect(() => {
-    playerRef.current?.setMask(mask);
-  }, [mask]);
+    playerRef.current?.setMasks(masks);
+  }, [masks]);
 
   useEffect(() => {
     return () => {
@@ -218,11 +220,13 @@ export default function App() {
       unload({ resetFileInput: false });
     }
     setFile(nextFile);
-    setMask(null);
-    loadVideo(nextFile, 0, null);
+    setMasks([]);
+    setDraftMask(null);
+    setMaskMessage("");
+    loadVideo(nextFile, 0, []);
   };
 
-  const loadVideo = (sourceFile: File, position = 0, sourceMask = mask) => {
+  const loadVideo = (sourceFile: File, position = 0, sourceMasks = masks) => {
     const previousPlayer = playerRef.current;
     playerRef.current = null;
     previousPlayer?.stop();
@@ -246,7 +250,7 @@ export default function App() {
       diffCanvas: diffCanvas.current!,
       threshold,
       frameThreshold,
-      mask: sourceMask,
+      masks: sourceMasks,
       onStats: (nextStats, event) => {
         if (playerRef.current !== player) return;
         updateStats(nextStats, event);
@@ -379,7 +383,7 @@ export default function App() {
         diffCanvas: diffCanvas.current!,
         threshold,
         frameThreshold,
-        mask: mask ? { ...mask } : null,
+        masks: masks.map(mask => ({ ...mask })),
         layout: overlayLayoutRef.current.map((element) => ({
           ...element,
           rect: { ...element.rect },
@@ -510,6 +514,10 @@ export default function App() {
   };
 
   const startMaskSelection = () => {
+    playerRef.current?.pause();
+    maskStartRef.current = null;
+    setDraftMask(null);
+    setMaskMessage("");
     setLayoutEditing(false);
     setMaskEditing(true);
     setPlayerControlsVisible(false);
@@ -522,7 +530,7 @@ export default function App() {
     const point = getNormalizedPointer(e);
     maskStartRef.current = point;
     e.currentTarget.setPointerCapture(e.pointerId);
-    setMask({ x: point.x, y: point.y, width: 0, height: 0 });
+    setDraftMask({ x: point.x, y: point.y, width: 0, height: 0 });
   };
 
   const handleMaskPointerMove = (
@@ -530,7 +538,7 @@ export default function App() {
   ) => {
     const start = maskStartRef.current;
     if (!maskEditing || !start) return;
-    setMask(rectFromPoints(start, getNormalizedPointer(e)));
+    setDraftMask(rectFromPoints(start, getNormalizedPointer(e)));
   };
 
   const finishMaskSelection = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -538,9 +546,22 @@ export default function App() {
     if (!start) return;
     const next = rectFromPoints(start, getNormalizedPointer(e));
     maskStartRef.current = null;
-    setMask(
-      next.width >= 0.002 && next.height >= 0.002 ? next : null,
-    );
+    setDraftMask(null);
+    if (next.width >= 0.002 && next.height >= 0.002) {
+      const nextMasks = [...masks, next];
+      const canvas = videoCanvas.current!;
+      if (getAnalyzedPixelCount(nextMasks, canvas.width, canvas.height) === 0) {
+        setMaskMessage(t("解析対象がなくなるため、このマスクは追加できません。", "This mask would leave no pixels to analyze."));
+      } else {
+        setMasks(nextMasks);
+      }
+    }
+    setMaskEditing(false);
+  };
+
+  const cancelMaskSelection = () => {
+    maskStartRef.current = null;
+    setDraftMask(null);
     setMaskEditing(false);
   };
 
@@ -672,24 +693,35 @@ export default function App() {
           onClick={startMaskSelection}
           disabled={!stats || loading || exporting || maskEditing}
         >
-          {mask
-            ? t("マスクを再選択", "Reselect mask")
-            : t("マスク範囲を選択", "Select mask area")}
+          {t("マスクを追加", "Add mask")}
         </button>
-        {mask && (
+        {masks.map((_, index) => (
+          <button
+            key={index}
+            type="button"
+            onClick={() => setMasks(current => current.filter((_, i) => i !== index))}
+            disabled={!stats || exporting || maskEditing}
+            aria-label={t(`マスク ${index + 1} を削除`, `Remove mask ${index + 1}`)}
+          >
+            {t(`マスク ${index + 1} ×`, `Mask ${index + 1} ×`)}
+          </button>
+        ))}
+        {masks.length > 0 && (
           <button
             type="button"
-            onClick={() => setMask(null)}
-            disabled={!stats || exporting}
+            onClick={() => setMasks([])}
+            disabled={!stats || exporting || maskEditing}
           >
-            {t("マスク解除", "Clear mask")}
+            {t("マスクをすべて解除", "Clear all masks")}
           </button>
         )}
         {maskEditing && (
           <span>
             {t("映像上をドラッグしてください", "Drag over the video")}
+            <button type="button" onClick={cancelMaskSelection}>{t("選択を中止", "Cancel selection")}</button>
           </span>
         )}
+        {maskMessage && <span role="status">{maskMessage}</span>}
         <label>
           {t("フレーム閾値", "Frame threshold")}: {(
             frameThreshold * 100
@@ -760,14 +792,15 @@ export default function App() {
               onPointerDown={handleMaskPointerDown}
               onPointerMove={handleMaskPointerMove}
               onPointerUp={finishMaskSelection}
-              onPointerCancel={finishMaskSelection}
+              onPointerCancel={cancelMaskSelection}
               aria-label={t(
                 "差分判定から除外する領域",
                 "Area excluded from difference detection",
               )}
             >
-              {mask && (
+              {masks.map((mask, index) => (
                 <div
+                  key={index}
                   className="mask-rectangle"
                   style={{
                     left: `${mask.x * 100}%`,
@@ -775,7 +808,13 @@ export default function App() {
                     width: `${mask.width * 100}%`,
                     height: `${mask.height * 100}%`,
                   }}
-                />
+                >{index + 1}</div>
+              ))}
+              {draftMask && (
+                <div className="mask-rectangle" style={{
+                  left: `${draftMask.x * 100}%`, top: `${draftMask.y * 100}%`,
+                  width: `${draftMask.width * 100}%`, height: `${draftMask.height * 100}%`,
+                }} />
               )}
             </div>
             <div

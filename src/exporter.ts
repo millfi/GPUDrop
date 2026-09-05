@@ -120,7 +120,7 @@ export interface ExportOptions {
   diffCanvas: HTMLCanvasElement;
   threshold: number;
   frameThreshold: number;
-  mask: RectMask | null;
+  masks: readonly RectMask[];
   layout: OverlayLayout;
   fpsRange: AxisRange;
   ftRange: AxisRange;
@@ -237,10 +237,13 @@ export async function exportOverlayVideo(
     const outputWidth = roundUpToEven(sourceWidth);
     const outputHeight = roundUpToEven(sourceHeight);
     const analyzedPixels = getAnalyzedPixelCount(
-      options.mask,
+      options.masks,
       sourceWidth,
       sourceHeight,
     );
+    if (analyzedPixels === 0) {
+      throw new Error(t("マスクを減らして解析対象を残してください", "Reduce the masks to leave pixels to analyze"));
+    }
 
     outputCanvas.width = outputWidth;
     outputCanvas.height = outputHeight;
@@ -322,7 +325,7 @@ export async function exportOverlayVideo(
         const result = await analyzer.compare(
           frame,
           options.threshold,
-          options.mask,
+          options.masks,
         );
         frame.close();
 

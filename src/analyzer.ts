@@ -22,9 +22,7 @@ export interface RectMask {
 const COMPUTE_SHADER = /* wgsl */ `
 struct Params {
   threshold: f32,
-  maskEnabled: u32,
-  maskMin: vec2<u32>,
-  maskMax: vec2<u32>,
+  maskCount: u32,
 };
 
 @group(0) @binding(0) var prevTex: texture_2d<f32>;
@@ -32,6 +30,7 @@ struct Params {
 @group(0) @binding(2) var diffTex: texture_storage_2d<rgba8unorm, write>;
 @group(0) @binding(3) var<storage, read_write> counter: atomic<u32>;
 @group(0) @binding(4) var<uniform> params: Params;
+@group(0) @binding(5) var<storage, read> masks: array<vec4<u32>>;
 
 fn s2l(c: f32) -> f32 {
   if (c <= 0.04045) { return c / 12.92; }
@@ -42,17 +41,12 @@ fn s2l(c: f32) -> f32 {
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   let dims = textureDimensions(prevTex);
   if (id.x >= dims.x || id.y >= dims.y) { return; }
-  if (
-    params.maskEnabled != 0u &&
-    id.x >= params.maskMin.x && id.x < params.maskMax.x &&
-    id.y >= params.maskMin.y && id.y < params.maskMax.y
-  ) {
-    textureStore(
-      diffTex,
-      vec2<i32>(id.xy),
-      vec4<f32>(0.05, 0.16, 0.24, 1.0)
-    );
-    return;
+  for (var i = 0u; i < params.maskCount; i++) {
+    let mask = masks[i];
+    if (id.x >= mask.x && id.y >= mask.y && id.x < mask.z && id.y < mask.w) {
+      textureStore(diffTex, vec2<i32>(id.xy), vec4<f32>(0.05, 0.16, 0.24, 1.0));
+      return;
+    }
   }
   let p = textureLoad(prevTex, vec2<i32>(id.xy), 0).rgb;
   let c = textureLoad(currTex, vec2<i32>(id.xy), 0).rgb;
@@ -110,6 +104,7 @@ export class Analyzer {
   private counterBuf!: GPUBuffer;
   private readBuf!: GPUBuffer;
   private uniBuf!: GPUBuffer;
+  private maskBuf!: GPUBuffer;
   private sampler!: GPUSampler;
   private ctx!: GPUCanvasContext;
   private w = 0;
@@ -175,8 +170,12 @@ export class Analyzer {
       usage: B.MAP_READ | B.COPY_DST,
     });
     this.uniBuf = this.device.createBuffer({
-      size: 24,
+      size: 8,
       usage: B.UNIFORM | B.COPY_DST,
+    });
+    this.maskBuf = this.device.createBuffer({
+      size: 16,
+      usage: B.STORAGE | B.COPY_DST,
     });
 
     const cm = this.device.createShaderModule({ code: COMPUTE_SHADER });
@@ -212,9 +211,9 @@ export class Analyzer {
   async compare(
     frame: VideoFrame,
     threshold: number,
-    mask: RectMask | null = null,
+    masks: readonly RectMask[] = [],
   ): Promise<{ diffCount: number; isFirst: boolean }> {
-    return this.enqueueWork(() => this.compareImpl(frame, threshold, mask));
+    return this.enqueueWork(() => this.compareImpl(frame, threshold, masks));
   }
 
   async prime(frame: VideoFrame) {
@@ -225,7 +224,7 @@ export class Analyzer {
     prevImage: ImageBitmap,
     currImage: ImageBitmap,
     threshold: number,
-    mask: RectMask | null = null,
+    masks: readonly RectMask[] = [],
   ) {
     await this.enqueueWork(async () => {
       this.device.queue.copyExternalImageToTexture(
@@ -242,7 +241,7 @@ export class Analyzer {
         this.scratchPrevTex,
         this.scratchCurrTex,
         threshold,
-        mask,
+        masks,
         false,
       );
     });
@@ -262,7 +261,7 @@ export class Analyzer {
   private async compareImpl(
     frame: VideoFrame,
     threshold: number,
-    mask: RectMask | null,
+    masks: readonly RectMask[],
   ): Promise<{ diffCount: number; isFirst: boolean }> {
     // Always copy the new frame into currTex.
     this.device.queue.copyExternalImageToTexture(
@@ -283,7 +282,7 @@ export class Analyzer {
       this.prevTex,
       this.currTex,
       threshold,
-      mask,
+      masks,
       true,
     );
 
@@ -305,18 +304,26 @@ export class Analyzer {
     prevTex: GPUTexture,
     currTex: GPUTexture,
     threshold: number,
-    mask: RectMask | null,
+    masks: readonly RectMask[],
     readCount: boolean,
   ) {
-    const bounds = getMaskPixelBounds(mask, this.w, this.h);
-    const params = new ArrayBuffer(24);
+    const bounds = getMasksPixelBounds(masks, this.w, this.h);
+    const maskData = new Uint32Array(Math.max(4, bounds.length * 4));
+    bounds.forEach((rect, i) => {
+      maskData.set([rect.minX, rect.minY, rect.maxX, rect.maxY], i * 4);
+    });
+    if (this.maskBuf.size < maskData.byteLength) {
+      this.maskBuf.destroy();
+      this.maskBuf = this.device.createBuffer({
+        size: maskData.byteLength,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+      });
+    }
+    this.device.queue.writeBuffer(this.maskBuf, 0, maskData);
+    const params = new ArrayBuffer(8);
     const paramsView = new DataView(params);
     paramsView.setFloat32(0, threshold, true);
-    paramsView.setUint32(4, bounds ? 1 : 0, true);
-    paramsView.setUint32(8, bounds?.minX ?? 0, true);
-    paramsView.setUint32(12, bounds?.minY ?? 0, true);
-    paramsView.setUint32(16, bounds?.maxX ?? 0, true);
-    paramsView.setUint32(20, bounds?.maxY ?? 0, true);
+    paramsView.setUint32(4, bounds.length, true);
     this.device.queue.writeBuffer(
       this.uniBuf,
       0,
@@ -332,6 +339,7 @@ export class Analyzer {
         { binding: 2, resource: this.diffTex.createView() },
         { binding: 3, resource: { buffer: this.counterBuf } },
         { binding: 4, resource: { buffer: this.uniBuf } },
+        { binding: 5, resource: { buffer: this.maskBuf } },
       ],
     });
 
@@ -412,6 +420,7 @@ export class Analyzer {
     this.counterBuf?.destroy();
     this.readBuf?.destroy();
     this.uniBuf?.destroy();
+    this.maskBuf?.destroy();
     this.device?.destroy();
   }
 
@@ -426,16 +435,34 @@ export class Analyzer {
 }
 
 export function getAnalyzedPixelCount(
-  mask: RectMask | null,
+  masks: readonly RectMask[],
   width: number,
   height: number,
 ) {
   const totalPixels = width * height;
-  const bounds = getMaskPixelBounds(mask, width, height);
-  if (!bounds) return totalPixels;
-  const maskedPixels =
-    (bounds.maxX - bounds.minX) * (bounds.maxY - bounds.minY);
+  const bounds = getMasksPixelBounds(masks, width, height);
+  // Sweep vertical strips and merge their Y intervals to count the union.
+  // Use the same integer bounds as the shader, including rounded edges.
+  const xs = [...new Set(bounds.flatMap(rect => [rect.minX, rect.maxX]))].sort((a, b) => a - b);
+  let maskedPixels = 0;
+  for (let i = 1; i < xs.length; i++) {
+    const intervals = bounds
+      .filter(rect => rect.minX < xs[i] && rect.maxX > xs[i - 1])
+      .sort((a, b) => a.minY - b.minY);
+    let end = 0;
+    let coveredHeight = 0;
+    for (const rect of intervals) {
+      coveredHeight += Math.max(0, rect.maxY - Math.max(end, rect.minY));
+      end = Math.max(end, rect.maxY);
+    }
+    maskedPixels += (xs[i] - xs[i - 1]) * coveredHeight;
+  }
   return Math.max(0, totalPixels - maskedPixels);
+}
+
+function getMasksPixelBounds(masks: readonly RectMask[], width: number, height: number) {
+  return masks.map(mask => getMaskPixelBounds(mask, width, height))
+    .filter((bounds): bounds is NonNullable<typeof bounds> => bounds !== null);
 }
 
 function getMaskPixelBounds(
@@ -444,6 +471,7 @@ function getMaskPixelBounds(
   height: number,
 ) {
   if (!mask || width <= 0 || height <= 0) return null;
+  if (![mask.x, mask.y, mask.width, mask.height].every(Number.isFinite)) return null;
   const x1 = clamp(mask.x, 0, 1);
   const y1 = clamp(mask.y, 0, 1);
   const x2 = clamp(mask.x + mask.width, 0, 1);

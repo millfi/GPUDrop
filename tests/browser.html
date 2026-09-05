@@ -1,0 +1,160 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>GPUDrop browser smoke test</title>
+<h1>GPUDrop browser smoke test</h1>
+<pre id="result">Running…</pre>
+<script type="module">
+import { BufferTarget, CanvasSource, Output, Mp4OutputFormat, Input, BlobSource, ALL_FORMATS, VideoSampleSink } from '/GPUDrop/node_modules/mediabunny/dist/bundles/mediabunny.mjs';
+import { Analyzer, getAnalyzedPixelCount } from '/GPUDrop/src/analyzer.ts';
+import { exportOverlayVideo } from '/GPUDrop/src/exporter.ts';
+import { Player } from '/GPUDrop/src/player.ts';
+import React from 'react';
+import { createRoot } from 'react-dom/client';
+import App from '/GPUDrop/src/App.tsx';
+
+const log = document.querySelector('#result');
+const lines = [];
+function check(condition, message) {
+  if (!condition) throw new Error(message);
+  lines.push('PASS ' + message);
+  log.textContent = lines.join('\n');
+}
+const canvas = () => Object.assign(document.createElement('canvas'), { width: 128, height: 128 });
+const masks = [
+  { x: 0, y: 0, width: 0.4, height: 0.5 },
+  { x: 0.25, y: 0, width: 0.75, height: 0.5 },
+];
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+async function until(fn) {
+  for (let i = 0; i < 500; i++) { if (fn()) return; await sleep(10); }
+  throw new Error('Timed out waiting for a video frame');
+}
+const originalPicker = window.showSaveFilePicker;
+let activePlayer;
+let appRoot;
+try {
+  const sourceCanvas = canvas();
+  const ctx = sourceCanvas.getContext('2d');
+  const source = new CanvasSource(sourceCanvas, { codec: 'avc', bitrate: 1_000_000 });
+  const target = new BufferTarget();
+  const output = new Output({ format: new Mp4OutputFormat(), target });
+  output.addVideoTrack(source);
+  await output.start();
+  for (let i = 0; i < 4; i++) {
+    ctx.fillStyle = 'black'; ctx.fillRect(0, 0, 128, 128);
+    ctx.fillStyle = 'white';
+    if (i >= 1) ctx.fillRect(8, 8, 16, 16);
+    if (i >= 2) ctx.fillRect(80, 8, 16, 16);
+    if (i >= 3) ctx.fillRect(40, 80, 16, 16);
+    await source.add(i / 10, 0.1);
+  }
+  source.close();
+  await output.finalize();
+  const file = new File([target.buffer], 'smoke.mp4', { type: 'video/mp4' });
+  check(file.size > 0, 'Generated a four-frame MP4 with WebCodecs');
+
+  // Validate the WGSL and compare overlapping masks on the actual GPU.
+  const analyzer = new Analyzer();
+  try {
+    await analyzer.init(128, 128, canvas());
+    ctx.fillStyle = 'black'; ctx.fillRect(0, 0, 128, 128);
+    let frame = new VideoFrame(sourceCanvas, { timestamp: 0 });
+    await analyzer.compare(frame, 0.05, masks); frame.close();
+    ctx.fillStyle = 'white'; ctx.fillRect(0, 0, 128, 128);
+    frame = new VideoFrame(sourceCanvas, { timestamp: 100000 });
+    const comparison = await analyzer.compare(frame, 0.05, masks); frame.close();
+    check(comparison.diffCount === getAnalyzedPixelCount(masks, 128, 128), 'GPU exclusion and CPU union area agree for overlapping masks');
+  } finally { analyzer.destroy(); }
+
+  const playbackStats = [];
+  activePlayer = new Player({
+    file, videoCanvas: canvas(), diffCanvas: canvas(), masks,
+    threshold: 0.05, frameThreshold: 0.005,
+    onStats: s => playbackStats.push(s), onDuplicate() {},
+  });
+  let playbackError;
+  const playback = activePlayer.start().catch(error => { playbackError = error; });
+  await until(() => playbackStats.length || playbackError);
+  if (playbackError) throw playbackError;
+  await sleep(100);
+  check(playbackStats.length === 1 && playbackStats[0].timestamp === 0, 'Loading displays exactly the first frame and stays paused');
+  await activePlayer.stepForward();
+  await until(() => playbackStats.length === 2);
+  await activePlayer.stepBackward();
+  check(playbackStats.at(-1).timestamp === 0, 'Previous frame returns to the first frame');
+  await activePlayer.stepForward();
+  activePlayer.resume();
+  await playback;
+  check(playbackStats.at(-1).frameNumber === 4, 'Player controls resume through the final frame');
+  activePlayer.stop(); activePlayer = null;
+
+  async function runExport(selectedMasks) {
+    const chunks = [];
+    window.showSaveFilePicker = async () => ({ createWritable: async () => new WritableStream({
+      write: chunk => chunks.push({ position: chunk.position, data: new Uint8Array(chunk.data) }),
+    }) });
+    const stats = [], duplicates = [];
+    await exportOverlayVideo({
+      file, videoCanvas: canvas(), diffCanvas: canvas(), masks: selectedMasks,
+      threshold: 0.05, frameThreshold: 0.005, layout: [],
+      fpsRange: { min: 0, max: 60 }, ftRange: { min: 0, max: 100 }, historyMaxPoints: 60,
+      signal: new AbortController().signal, onStats: s => stats.push(s),
+      onDuplicate: e => duplicates.push(e.frameNumber), onProgress() {},
+    });
+    const bytes = new Uint8Array(Math.max(...chunks.map(c => c.position + c.data.length)));
+    chunks.forEach(c => bytes.set(c.data, c.position));
+    const input = new Input({ formats: ALL_FORMATS, source: new BlobSource(new Blob([bytes])) });
+    try {
+      const track = await input.getPrimaryVideoTrack();
+      const timestamps = [];
+      for await (const sample of new VideoSampleSink(track).samples()) {
+        timestamps.push(sample.timestamp); sample.close();
+      }
+      check(timestamps.length === 4 && Math.abs(timestamps[0]) < 0.00001 && Math.abs(timestamps[3] - 0.3) < 0.00001,
+        'Exported MP4 decodes all four frames with the original timeline');
+    } finally { input.dispose(); }
+    return { stats, duplicates };
+  }
+  const unmasked = await runExport([]);
+  const masked = await runExport(masks);
+  check(unmasked.duplicates.length === 0, 'Unmasked export detects both moving regions');
+  check(JSON.stringify(masked.duplicates) === '[2,3]', 'Export applies both masks and still detects changes outside them');
+  check(masked.stats.at(-1).fps === playbackStats.at(-1).fps, 'Export and uninterrupted playback agree on masked FPS');
+
+  const container = document.createElement('div');
+  document.body.append(container);
+  appRoot = createRoot(container);
+  appRoot.render(React.createElement(App));
+  await until(() => container.querySelector('input[type=file]'));
+  const input = container.querySelector('input[type=file]');
+  const transfer = new DataTransfer(); transfer.items.add(file);
+  input.files = transfer.files;
+  input.dispatchEvent(new Event('change', { bubbles: true }));
+  await until(() => container.textContent.includes('frame#1'));
+  await sleep(100);
+  check(container.textContent.includes('frame#1'), 'Actual React UI automatically displays the first frame paused');
+  const buttons = () => [...container.querySelectorAll('button')];
+  const step = buttons().find(b => ['Next frame', '1フレーム進む'].includes(b.getAttribute('aria-label')));
+  step.click();
+  await until(() => container.textContent.includes('frame#2'));
+  const exportButton = buttons().find(b => ['Export', 'エクスポート'].includes(b.textContent));
+  check(!exportButton.disabled, 'Actual UI permits export while paused midway');
+  exportButton.click();
+  await until(() => /Export complete|書き出し完了/.test(container.textContent));
+  const play = () => buttons().find(b => ['Play', '再生'].includes(b.getAttribute('aria-label')));
+  await until(() => play() && !play().disabled && container.textContent.includes('t=0.100s'));
+  check(container.textContent.includes('t=0.100s'), 'Export restores the paused player at its original position');
+  play().click();
+  await until(() => container.textContent.includes('t=0.300s'));
+  check(true, 'Restored player can resume after export with shared preview canvases');
+  lines.push('ALL PASSED');
+  log.textContent = lines.join('\n');
+} catch (error) {
+  console.error(error);
+  log.textContent = lines.join('\n') + '\nFAIL ' + error.stack;
+} finally {
+  activePlayer?.stop();
+  appRoot?.unmount();
+  window.showSaveFilePicker = originalPicker;
+}
+</script>

@@ -30,9 +30,56 @@ test('file selection shows the first frame paused with editing and export availa
   app.render();
   assert.equal(app.players.length, 1);
   assert.equal(app.find(n => n.props?.['aria-label'] === 'Play').props.disabled, false);
-  assert.equal(app.find(n => n.props?.children === 'Select mask area').props.disabled, false);
+  assert.equal(app.find(n => n.props?.children === 'Add mask').props.disabled, false);
   assert.equal(app.find(n => n.props?.children === 'Edit layout').props.disabled, false);
   assert.equal(app.find(n => n.props?.children === 'Export').props.disabled, false);
+});
+
+function drawMask(app, x1, y1, x2, y2, cancel = false) {
+  app.find(n => n.props?.children === 'Add mask').props.onClick();
+  app.render();
+  const layer = () => app.find(n => n.props?.className === 'mask-layer is-editing');
+  const currentTarget = {
+    getBoundingClientRect: () => ({ left: 0, top: 0, width: 100, height: 100 }),
+    setPointerCapture() {},
+  };
+  layer().props.onPointerDown({ button: 0, pointerId: 1, clientX: x1, clientY: y1, currentTarget });
+  app.render();
+  if (cancel) layer().props.onPointerCancel();
+  else layer().props.onPointerUp({ clientX: x2, clientY: y2, currentTarget });
+  app.render();
+}
+
+test('multiple masks are exported, independently removable, and reset for a new file', async () => {
+  const app = createApp();
+  const choose = name => {
+    app.find(n => n.props?.type === 'file').props.onChange({ target: { files: [{ name }] } });
+    app.render();
+  };
+  choose('first.mp4');
+  drawMask(app, 0, 0, 30, 30);
+  drawMask(app, 20, 20, 50, 50);
+  drawMask(app, 70, 70, 80, 80, true);
+  assert.equal(app.nodes().filter(n => n.props?.className === 'mask-rectangle').length, 2);
+  await app.find(n => n.props?.children === 'Export').props.onClick();
+  assert.equal(app.exports[0].masks.length, 2);
+  assert.equal(app.exports[0].masks[1].x, 0.2);
+  app.render();
+  app.find(n => n.props?.['aria-label'] === 'Remove mask 1').props.onClick();
+  app.render();
+  assert.equal(app.nodes().filter(n => n.props?.className === 'mask-rectangle').length, 1);
+  choose('second.mp4');
+  assert.equal(app.nodes().filter(n => n.props?.className === 'mask-rectangle').length, 0);
+});
+
+test('masks that would exclude the entire frame are rejected', () => {
+  const app = createApp();
+  app.find(n => n.props?.type === 'file').props.onChange({ target: { files: [{ name: 'test.mp4' }] } });
+  app.render();
+  drawMask(app, 0, 0, 50, 100);
+  drawMask(app, 50, 0, 100, 100);
+  assert.equal(app.nodes().filter(n => n.props?.className === 'mask-rectangle').length, 1);
+  app.find(n => n.props?.children === 'This mask would leave no pixels to analyze.');
 });
 
 test('callbacks from a replaced file cannot overwrite the new player', () => {
