@@ -329,6 +329,9 @@ export class Player {
 
   async start() {
     try {
+      // Decode exactly one frame on load, then wait for the player controls.
+      this.pause();
+      this.stepBudget = 1;
       const source = new BlobSource(this.opts.file, {
         maxCacheSize: 8 * 1024 * 1024,
       });
@@ -338,6 +341,7 @@ export class Player {
       });
 
       const track = await this.input.getPrimaryVideoTrack();
+      if (this.stopped) return;
       if (!track) {
         throw new Error(t("動画トラックがありません", "No video track found"));
       }
@@ -362,6 +366,7 @@ export class Player {
 
       const w = await track.getCodedWidth();
       const h = await track.getCodedHeight();
+      if (this.stopped) return;
       this.totalPixels = w * h;
 
       this.opts.videoCanvas.width = w;
@@ -370,15 +375,18 @@ export class Player {
 
       this.analyzer = new Analyzer();
       await this.analyzer.init(w, h, this.opts.diffCanvas);
+      if (this.stopped) {
+        this.analyzer.destroy();
+        return;
+      }
 
       const sink = new VideoSampleSink(track);
       this.sampleSink = sink;
       await this.runPlayback(this.mediaStartTime);
     } catch (e) {
       if (this.stopped) return;
-      console.error(e);
-      alert((e as Error).message);
       this.stop();
+      throw e;
     }
   }
 

@@ -65,6 +65,7 @@ export default function App() {
   const [mask, setMask] = useState<RectMask | null>(null);
   const [maskEditing, setMaskEditing] = useState(false);
   const [running, setRunning] = useState(false);
+  const [loading, setLoading] = useState(false);
   const [paused, setPaused] = useState(false);
   const [duration, setDuration] = useState(0);
   const [seekValue, setSeekValue] = useState(0);
@@ -179,8 +180,9 @@ export default function App() {
     exportAbortRef.current?.abort();
     exportAbortRef.current = null;
     seekRequestIdRef.current++;
-    playerRef.current?.stop();
+    const previousPlayer = playerRef.current;
     playerRef.current = null;
+    previousPlayer?.stop();
     historyRef.current = [];
     historyIndexRef.current = -1;
     statsRef.current = null;
@@ -191,6 +193,7 @@ export default function App() {
     setSeekValue(0);
     setSeeking(false);
     setRunning(false);
+    setLoading(false);
     setPaused(false);
     setExporting(false);
     setExportProgress(null);
@@ -215,11 +218,14 @@ export default function App() {
       unload({ resetFileInput: false });
     }
     setFile(nextFile);
+    setMask(null);
+    loadVideo(nextFile, 0, null);
   };
 
-  const start = async () => {
-    if (!file || exporting) return;
-    playerRef.current?.stop();
+  const loadVideo = (sourceFile: File, position = 0, sourceMask = mask) => {
+    const previousPlayer = playerRef.current;
+    playerRef.current = null;
+    previousPlayer?.stop();
     historyRef.current = [];
     historyIndexRef.current = -1;
     statsRef.current = null;
@@ -229,39 +235,59 @@ export default function App() {
     setSeekValue(0);
     seekRequestIdRef.current++;
     setSeeking(false);
+    setLoading(true);
+    setMaskEditing(false);
+    setLayoutEditing(false);
     drawHistoryCharts();
 
     const player = new Player({
-      file,
+      file: sourceFile,
       videoCanvas: videoCanvas.current!,
       diffCanvas: diffCanvas.current!,
       threshold,
       frameThreshold,
-      mask,
-      onStats: updateStats,
-      onDuplicate: recordDuplicateEvent,
+      mask: sourceMask,
+      onStats: (nextStats, event) => {
+        if (playerRef.current !== player) return;
+        updateStats(nextStats, event);
+        setLoading(false);
+        if (position > 0) {
+          const restorePosition = position;
+          position = 0;
+          startSeek(restorePosition);
+        }
+      },
+      onDuplicate: (event) => {
+        if (playerRef.current === player) recordDuplicateEvent(event);
+      },
       onEnd: () => {
+        if (playerRef.current !== player) return;
         seekRequestIdRef.current++;
         setSeeking(false);
         setRunning(false);
+        setLoading(false);
       },
       onReady: ({ timestamp, duration }) => {
+        if (playerRef.current !== player) return;
         setDuration(duration);
         setSeekValue(timestamp);
       },
-      onPausedChange: setPaused,
+      onPausedChange: (nextPaused) => {
+        if (playerRef.current === player) setPaused(nextPaused);
+      },
     });
     playerRef.current = player;
     setRunning(true);
-    setPaused(false);
-    try {
-      await player.start();
-    } catch (e) {
+    setPaused(true);
+    void player.start().catch((e) => {
+      if (playerRef.current !== player) return;
+      playerRef.current = null;
       console.error(e);
       alert((e as Error).message);
       setRunning(false);
-      setPaused(false);
-    }
+      setLoading(false);
+      setPaused(true);
+    });
   };
 
   const togglePlayback = () => {
@@ -318,10 +344,12 @@ export default function App() {
   };
 
   const startExport = async () => {
-    if (!file || exporting || (running && !paused)) return;
+    if (!file || loading || seeking || exporting || (running && !paused)) return;
 
-    playerRef.current?.stop();
+    const restorePosition = statsRef.current?.timestamp ?? 0;
+    const previousPlayer = playerRef.current;
     playerRef.current = null;
+    previousPlayer?.stop();
     historyRef.current = [];
     historyIndexRef.current = -1;
     statsRef.current = null;
@@ -392,6 +420,7 @@ export default function App() {
         exportAbortRef.current = null;
       }
       setExporting(false);
+      loadVideo(file, restorePosition);
     }
   };
 
@@ -641,7 +670,7 @@ export default function App() {
         <button
           type="button"
           onClick={startMaskSelection}
-          disabled={!stats || exporting || maskEditing}
+          disabled={!stats || loading || exporting || maskEditing}
         >
           {mask
             ? t("マスクを再選択", "Reselect mask")
@@ -675,10 +704,7 @@ export default function App() {
             onChange={(e) => setFrameThreshold(parseFloat(e.target.value))}
           />
         </label>
-        <button onClick={start} disabled={!file || running || exporting}>
-          {t("開始", "Start")}
-        </button>
-        <button onClick={startExport} disabled={!file || (running && !paused) || exporting}>
+        <button onClick={startExport} disabled={!file || loading || seeking || (running && !paused) || exporting}>
           {t("エクスポート", "Export")}
         </button>
         {exporting && (
@@ -689,6 +715,7 @@ export default function App() {
             {paused ? t("一時停止中", "Paused") : t("再生中…", "Playing…")}
           </span>
         )}
+        {loading && <span role="status">{t("読み込み中…", "Loading…")}</span>}
         {exporting && <span>{t("書き出し中…", "Exporting…")}</span>}
       </div>
 
@@ -824,7 +851,7 @@ export default function App() {
                   type="button"
                   className="icon-button"
                   onClick={stepBackward}
-                  disabled={exporting}
+                  disabled={!stats || loading || seeking || exporting}
                   title={t("1フレーム戻る", "Previous frame")}
                   aria-label={t("1フレーム戻る", "Previous frame")}
                 >
@@ -834,7 +861,7 @@ export default function App() {
                   type="button"
                   className="icon-button"
                   onClick={togglePlayback}
-                  disabled={exporting}
+                  disabled={!stats || loading || seeking || exporting}
                   title={
                     paused ? t("再生", "Play") : t("一時停止", "Pause")
                   }
@@ -848,7 +875,7 @@ export default function App() {
                   type="button"
                   className="icon-button"
                   onClick={stepForward}
-                  disabled={exporting}
+                  disabled={!stats || loading || seeking || exporting}
                   title={t("1フレーム進む", "Next frame")}
                   aria-label={t("1フレーム進む", "Next frame")}
                 >
@@ -862,7 +889,7 @@ export default function App() {
                   max={duration || 0}
                   step={0.001}
                   value={Math.min(seekValue, duration || 0)}
-                  disabled={exporting || duration <= 0}
+                  disabled={!stats || loading || exporting || duration <= 0}
                   onChange={(e) => seek(parseFloat(e.target.value))}
                   aria-label={t("シーク", "Seek")}
                 />
