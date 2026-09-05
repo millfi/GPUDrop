@@ -318,7 +318,7 @@ export default function App() {
   };
 
   const startExport = async () => {
-    if (!file || exporting || running) return;
+    if (!file || exporting || (running && !paused)) return;
 
     playerRef.current?.stop();
     playerRef.current = null;
@@ -678,7 +678,7 @@ export default function App() {
         <button onClick={start} disabled={!file || running || exporting}>
           {t("開始", "Start")}
         </button>
-        <button onClick={startExport} disabled={!file || running || exporting}>
+        <button onClick={startExport} disabled={!file || (running && !paused) || exporting}>
           {t("エクスポート", "Export")}
         </button>
         {exporting && (
