@@ -159,6 +159,38 @@
                 max-width: 100%;
                 background: #000;
             }
+            .video-stage {
+                position: relative;
+            }
+            .video-panel:fullscreen {
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                width: 100%;
+                height: 100%;
+                overflow: hidden;
+            }
+            .video-panel:fullscreen .video-stage {
+                width: min(100vw, calc(100vh * var(--video-aspect-ratio)));
+                flex: 0 0 auto;
+            }
+            .video-panel:fullscreen .video-stage > canvas:first-child {
+                width: 100%;
+            }
+            .fullscreen-button {
+                flex: 0 0 auto;
+            }
+            .fullscreen-message {
+                position: absolute;
+                z-index: 7;
+                top: 8px;
+                left: 8px;
+                right: 8px;
+                padding: 8px;
+                color: #fff;
+                background: rgb(0 0 0 / 80%);
+                font-size: 12px;
+            }
             .preview-overlay-canvas {
                 position: absolute;
                 inset: 0;

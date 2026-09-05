@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ChangeEvent } from "react";
+import { useEffect, useRef, useState, type ChangeEvent, type CSSProperties } from "react";
 import {
   ExportCanceledError,
   exportOverlayVideo,
@@ -72,6 +72,8 @@ export default function App() {
   const [duration, setDuration] = useState(0);
   const [seekValue, setSeekValue] = useState(0);
   const [playerControlsVisible, setPlayerControlsVisible] = useState(true);
+  const [previewFullscreen, setPreviewFullscreen] = useState(false);
+  const [fullscreenMessage, setFullscreenMessage] = useState("");
   const [previewOverlayVisible, setPreviewOverlayVisible] = useState(false);
   const [layoutEditing, setLayoutEditing] = useState(false);
   const [selectedOverlayKind, setSelectedOverlayKind] =
@@ -176,6 +178,59 @@ export default function App() {
       document.removeEventListener("pointerdown", handlePointerDown);
     };
   }, []);
+
+  useEffect(() => {
+    const handleFullscreenChange = () => {
+      setPreviewFullscreen(document.fullscreenElement === videoPanelRef.current);
+      setPlayerControlsVisible(true);
+      setFullscreenMessage("");
+    };
+    document.addEventListener("fullscreenchange", handleFullscreenChange);
+    return () => {
+      document.removeEventListener("fullscreenchange", handleFullscreenChange);
+    };
+  }, []);
+
+  const togglePreviewFullscreen = async () => {
+    const panel = videoPanelRef.current;
+    if (!panel) return;
+    setFullscreenMessage("");
+    try {
+      if (document.fullscreenElement === panel) {
+        await document.exitFullscreen();
+      } else {
+        await panel.requestFullscreen();
+      }
+    } catch {
+      setFullscreenMessage(t(
+        "全画面表示を切り替えられませんでした。もう一度お試しください。",
+        "Could not switch fullscreen mode. Please try again.",
+      ));
+    }
+  };
+
+  useEffect(() => {
+    const handleFullscreenKey = (event: KeyboardEvent) => {
+      const isPreviewFullscreen = document.fullscreenElement === videoPanelRef.current;
+      const isExitKey = event.key === "Escape" && isPreviewFullscreen;
+      if (
+        (event.key.toLowerCase() !== "f" && !isExitKey) ||
+        event.repeat || event.isComposing || event.defaultPrevented ||
+        event.ctrlKey || event.altKey || event.metaKey
+      ) return;
+      const target = event.target;
+      if (!isExitKey && target instanceof HTMLElement && (
+        target.isContentEditable || target.closest("input, textarea, select, [role='textbox']")
+      )) return;
+      if (!isPreviewFullscreen && (!stats || !document.fullscreenEnabled)) return;
+      event.preventDefault();
+      void togglePreviewFullscreen();
+    };
+    document.addEventListener("keydown", handleFullscreenKey);
+    return () => {
+      document.removeEventListener("keydown", handleFullscreenKey);
+    };
+  }, [!!stats]);
 
   const unload = (options: { resetFileInput?: boolean } = {}) => {
     const { resetFileInput = true } = options;
@@ -761,12 +816,6 @@ export default function App() {
           ? `${t("現在値", "Current")}: fps=${stats.fps}  ${t("フレームタイム", "frameTime")}=${(stats.frameTime * 1000).toFixed(2)}ms`
           : `${t("現在値", "Current")}: —`}
       </div>
-      <p>
-        {t(
-          "現在の設定で全編を再解析して書き出します。再生位置は書き出し範囲に影響しません。",
-          "Export reanalyzes the entire video with the current settings, regardless of the playback position.",
-        )}
-      </p>
       {(exporting || exportMessage) && (
         <div className="stats">
           {exporting && exportProgress
@@ -779,108 +828,120 @@ export default function App() {
         <div className="media-column">
           <div>{t("映像", "Video")}</div>
           <div ref={videoPanelRef} className="video-panel">
-            <canvas ref={videoCanvas} />
-            <canvas
-              ref={overlayCanvas}
-              className="preview-overlay-canvas"
-              aria-hidden="true"
-            />
             <div
-              className={`mask-layer${
-                maskEditing ? " is-editing" : ""
-              }`}
-              onPointerDown={handleMaskPointerDown}
-              onPointerMove={handleMaskPointerMove}
-              onPointerUp={finishMaskSelection}
-              onPointerCancel={cancelMaskSelection}
-              aria-label={t(
-                "差分判定から除外する領域",
-                "Area excluded from difference detection",
-              )}
+              className="video-stage"
+              style={{
+                "--video-aspect-ratio": videoCanvas.current
+                  ? videoCanvas.current.width / (videoCanvas.current.height || 1)
+                  : 16 / 9,
+              } as CSSProperties}
             >
-              {masks.map((mask, index) => (
-                <div
-                  key={index}
-                  className="mask-rectangle"
-                  style={{
-                    left: `${mask.x * 100}%`,
-                    top: `${mask.y * 100}%`,
-                    width: `${mask.width * 100}%`,
-                    height: `${mask.height * 100}%`,
-                  }}
-                >{index + 1}</div>
-              ))}
-              {draftMask && (
-                <div className="mask-rectangle" style={{
-                  left: `${draftMask.x * 100}%`, top: `${draftMask.y * 100}%`,
-                  width: `${draftMask.width * 100}%`, height: `${draftMask.height * 100}%`,
-                }} />
-              )}
-            </div>
-            <div
-              ref={overlayEditorRef}
-              className={`overlay-editor-layer${
-                layoutEditing ? " is-editing" : ""
-              }`}
-              onPointerMove={handleOverlayPointerMove}
-              onPointerUp={finishOverlayDrag}
-              onPointerCancel={finishOverlayDrag}
-              aria-label={t(
-                "エクスポートオーバーレイの配置",
-                "Export overlay layout",
-              )}
-            >
-              {layoutEditing &&
-                overlayLayout.map((element) => {
-                  const rect = getOverlayElementRect(
-                    element,
-                    videoCanvas.current?.width ?? 16,
-                    videoCanvas.current?.height ?? 9,
-                  );
-                  return (
-                    <div
-                      key={element.kind}
-                      className={`overlay-edit-box${
-                        selectedOverlayKind === element.kind
-                          ? " is-selected"
-                          : ""
-                      }${element.visible ? "" : " is-hidden-element"}`}
-                      style={{
-                        left: `${rect.x * 100}%`,
-                        top: `${rect.y * 100}%`,
-                        width: `${rect.width * 100}%`,
-                        height: `${rect.height * 100}%`,
-                      }}
-                      onPointerDown={(e) =>
-                        beginOverlayDrag(e, element.kind, "move")
-                      }
-                    >
-                      <span className="overlay-edit-label">
-                        {OVERLAY_ELEMENT_LABELS[element.kind]}
-                      </span>
-                      <button
-                        type="button"
-                        className="overlay-resize-handle"
-                        onPointerDown={(e) =>
-                          beginOverlayDrag(e, element.kind, "resize")
-                        }
-                        aria-label={t(
-                          `${OVERLAY_ELEMENT_LABELS[element.kind]}をリサイズ`,
-                          `Resize ${OVERLAY_ELEMENT_LABELS[element.kind]}`,
-                        )}
-                      />
-                    </div>
-                  );
-                })}
-            </div>
-            {seeking && (
+              <canvas ref={videoCanvas} />
+              <canvas
+                ref={overlayCanvas}
+                className="preview-overlay-canvas"
+                aria-hidden="true"
+              />
               <div
-                className="seek-loading"
-                role="status"
-                aria-label={t("シーク中", "Seeking")}
+                className={`mask-layer${
+                  maskEditing ? " is-editing" : ""
+                }`}
+                onPointerDown={handleMaskPointerDown}
+                onPointerMove={handleMaskPointerMove}
+                onPointerUp={finishMaskSelection}
+                onPointerCancel={cancelMaskSelection}
+                aria-label={t(
+                  "差分判定から除外する領域",
+                  "Area excluded from difference detection",
+                )}
               >
-                <LoadingIcon />
+                {masks.map((mask, index) => (
+                  <div
+                    key={index}
+                    className="mask-rectangle"
+                    style={{
+                      left: `${mask.x * 100}%`,
+                      top: `${mask.y * 100}%`,
+                      width: `${mask.width * 100}%`,
+                      height: `${mask.height * 100}%`,
+                    }}
+                  >{index + 1}</div>
+                ))}
+                {draftMask && (
+                  <div className="mask-rectangle" style={{
+                    left: `${draftMask.x * 100}%`, top: `${draftMask.y * 100}%`,
+                    width: `${draftMask.width * 100}%`, height: `${draftMask.height * 100}%`,
+                  }} />
+                )}
               </div>
+              <div
+                ref={overlayEditorRef}
+                className={`overlay-editor-layer${
+                  layoutEditing ? " is-editing" : ""
+                }`}
+                onPointerMove={handleOverlayPointerMove}
+                onPointerUp={finishOverlayDrag}
+                onPointerCancel={finishOverlayDrag}
+                aria-label={t(
+                  "エクスポートオーバーレイの配置",
+                  "Export overlay layout",
+                )}
+              >
+                {layoutEditing &&
+                  overlayLayout.map((element) => {
+                    const rect = getOverlayElementRect(
+                      element,
+                      videoCanvas.current?.width ?? 16,
+                      videoCanvas.current?.height ?? 9,
+                    );
+                    return (
+                      <div
+                        key={element.kind}
+                        className={`overlay-edit-box${
+                          selectedOverlayKind === element.kind
+                            ? " is-selected"
+                            : ""
+                        }${element.visible ? "" : " is-hidden-element"}`}
+                        style={{
+                          left: `${rect.x * 100}%`,
+                          top: `${rect.y * 100}%`,
+                          width: `${rect.width * 100}%`,
+                          height: `${rect.height * 100}%`,
+                        }}
+                        onPointerDown={(e) =>
+                          beginOverlayDrag(e, element.kind, "move")
+                        }
+                      >
+                        <span className="overlay-edit-label">
+                          {OVERLAY_ELEMENT_LABELS[element.kind]}
+                        </span>
+                        <button
+                          type="button"
+                          className="overlay-resize-handle"
+                          onPointerDown={(e) =>
+                            beginOverlayDrag(e, element.kind, "resize")
+                          }
+                          aria-label={t(
+                            `${OVERLAY_ELEMENT_LABELS[element.kind]}をリサイズ`,
+                            `Resize ${OVERLAY_ELEMENT_LABELS[element.kind]}`,
+                          )}
+                        />
+                      </div>
+                    );
+                  })}
+              </div>
+              {seeking && (
+                <div
+                  className="seek-loading"
+                  role="status"
+                  aria-label={t("シーク中", "Seeking")}
+                >
+                  <LoadingIcon />
+                </div>
+              )}
+            </div>
+            {fullscreenMessage && (
+              <div className="fullscreen-message" role="status">{fullscreenMessage}</div>
             )}
             <div
               className={`video-overlay${playerControlsVisible && !layoutEditing && !maskEditing ? "" : " is-hidden"}`}
@@ -936,6 +997,20 @@ export default function App() {
                   {formatTime(seekValue)} / {formatTime(duration)}
                 </span>
               </label>
+              <button
+                type="button"
+                className="icon-button fullscreen-button"
+                onClick={togglePreviewFullscreen}
+                disabled={!previewFullscreen && (!stats || !document.fullscreenEnabled)}
+                title={!document.fullscreenEnabled
+                  ? t("このブラウザでは全画面表示を利用できません", "Fullscreen is unavailable in this browser")
+                  : previewFullscreen ? t("全画面表示を終了 (F)", "Exit fullscreen (F)") : t("全画面表示 (F)", "Enter fullscreen (F)")}
+                aria-label={previewFullscreen ? t("全画面表示を終了", "Exit fullscreen") : t("全画面表示", "Enter fullscreen")}
+                aria-pressed={previewFullscreen}
+                aria-keyshortcuts="f"
+              >
+                <FullscreenIcon active={previewFullscreen} />
+              </button>
             </div>
           </div>
           <div
@@ -1245,6 +1320,23 @@ function AxisRangeControl({
         </div>
       </div>
     </div>
+  );
+}
+
+function FullscreenIcon({ active }: { active: boolean }) {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path
+        d={active
+          ? "M4 9h5V4m6 0v5h5M4 15h5v5m6 0v-5h5"
+          : "M9 4H4v5m16 0V4h-5M4 15v5h5m6 0h5v-5"}
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
   );
 }
 
