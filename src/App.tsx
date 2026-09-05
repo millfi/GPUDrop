@@ -1,3 +1,5 @@
+import { EncodingSettingsPanel } from "./EncodingSettingsPanel";
+import { DEFAULT_ENCODING_SETTINGS, validateEncodingSettings, type EncodingSettings } from "./encoding-settings";
 import { useEffect, useRef, useState, type ChangeEvent, type CSSProperties } from "react";
 import {
   ExportCanceledError,
@@ -82,6 +84,8 @@ export default function App() {
     loadOverlayLayout(),
   );
   const [seeking, setSeeking] = useState(false);
+  const [encoding, setEncoding] = useState<EncodingSettings>({ ...DEFAULT_ENCODING_SETTINGS });
+  const encodingError = validateEncodingSettings(encoding);
   const [exporting, setExporting] = useState(false);
   const [exportProgress, setExportProgress] = useState<ExportProgress | null>(
     null,
@@ -311,7 +315,9 @@ export default function App() {
         updateStats(nextStats, event);
         setLoading(false);
         if (position > 0) {
-          const restorePosition = position;
+          if (encodingError) { setExportMessage(encodingError); return; }
+
+    const restorePosition = position;
           position = 0;
           startSeek(restorePosition);
         }
@@ -434,6 +440,7 @@ export default function App() {
     try {
       const result = await exportOverlayVideo({
         file,
+        encoding: { ...encoding },
         videoCanvas: videoCanvas.current!,
         diffCanvas: diffCanvas.current!,
         threshold,
@@ -791,7 +798,7 @@ export default function App() {
             onChange={(e) => setFrameThreshold(parseFloat(e.target.value))}
           />
         </label>
-        <button onClick={startExport} disabled={!file || loading || seeking || (running && !paused) || exporting}>
+        <button onClick={startExport} disabled={!!encodingError || !file || loading || seeking || (running && !paused) || exporting}>
           {t("エクスポート", "Export")}
         </button>
         {exporting && (
@@ -1013,6 +1020,7 @@ export default function App() {
               </button>
             </div>
           </div>
+          <EncodingSettingsPanel value={encoding} onChange={setEncoding} disabled={exporting} error={encodingError} />
           <div
             className="overlay-settings"
             role="group"

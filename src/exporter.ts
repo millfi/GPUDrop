@@ -30,6 +30,8 @@ import {
   type OverlayLayout,
 } from "./overlay";
 
+import { DEFAULT_ENCODING_SETTINGS, makeEncodingConfig, validateEncodingSettings, type EncodingSettings } from "./encoding-settings";
+
 const EXPORT_QUALITY_FACTOR = 4;
 const DEFAULT_FRAME_DURATION = 1 / 60;
 const EXPORT_CHUNK_SIZE = 16 * 1024 * 1024;
@@ -116,6 +118,7 @@ export interface ExportProgress {
 
 export interface ExportOptions {
   file: File;
+  encoding?: EncodingSettings;
   videoCanvas: HTMLCanvasElement;
   diffCanvas: HTMLCanvasElement;
   threshold: number;
@@ -256,6 +259,7 @@ export async function exportOverlayVideo(
     const encodingConfig = await selectEncodingConfig(
       outputWidth,
       outputHeight,
+      options.encoding,
     );
     const outputFormat = new Mp4OutputFormat();
     const audioPreparation = await prepareAudioPassthrough(
@@ -531,39 +535,30 @@ async function copyAudioPackets(
   }
 }
 
-async function selectEncodingConfig(width: number, height: number) {
-  const candidates = buildCodecCandidates(width, height);
+export async function selectEncodingConfig(width: number, height: number, settings = DEFAULT_ENCODING_SETTINGS) {
+  const error = validateEncodingSettings(settings);
+  if (error) throw new Error(error);
+  const candidates = buildCodecCandidates(width, height).filter(candidate =>
+    settings.codec === "auto" || candidate.codec === settings.codec);
+  const failures: string[] = [];
   for (const candidate of candidates) {
-    const bitrate = estimateVideoBitrate(candidate.codec, width, height);
-    const canEncode = await canEncodeVideo(candidate.codec, {
-      width,
-      height,
-      bitrate,
-      bitrateMode: "variable",
-      latencyMode: "quality",
-      hardwareAcceleration: "prefer-hardware",
-      fullCodecString: candidate.fullCodecString,
-    });
-    if (canEncode) {
-      return {
-        codecLabel: candidate.codecLabel,
-        codec: candidate.codec,
-        bitrate,
-        bitrateMode: "variable",
-        latencyMode: "quality",
-        hardwareAcceleration: "prefer-hardware",
-        fullCodecString: candidate.fullCodecString,
-        keyFrameInterval: 2,
-      } satisfies VideoEncodingConfig & { codecLabel: string };
+    // Derive the codec level from custom rate control rather than the old fixed bitrate.
+    const config = makeEncodingConfig(settings, candidate.codec,
+      estimateVideoBitrate(candidate.codec, width, height),
+      settings.rateControl === "auto" ? candidate.fullCodecString : undefined);
+    try {
+      if (await canEncodeVideo(candidate.codec, { width, height, ...config })) {
+        return { ...config, codecLabel: candidate.codec.toUpperCase() + (config.fullCodecString ? " (" + config.fullCodecString + ")" : "") };
+      }
+      failures.push(candidate.codec.toUpperCase());
+    } catch (error) {
+      failures.push(candidate.codec.toUpperCase() + ": " + getErrorMessage(error));
     }
   }
-
-  throw new Error(
-    t(
-      "この環境で利用できる書き出し用動画コーデックがありません",
-      "No video codec is available for export in this environment",
-    ),
-  );
+  throw new Error(t(
+    "指定したエンコード設定はこの環境で利用できません。コーデック・品質方式・詳細設定を変更してください",
+    "The requested encoding settings are unsupported. Change the codec, rate control or advanced settings",
+  ) + " (" + failures.join("; ") + ")");
 }
 
 function buildCodecCandidates(width: number, height: number): CodecCandidate[] {
