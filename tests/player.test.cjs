@@ -10,7 +10,7 @@ async function until(predicate) {
   assert.fail('Timed out waiting for player');
 }
 
-test('real playback pipeline loads one frame, steps both ways, resumes and stops', async () => {
+test('real playback pipeline loads one frame, steps both ways, resumes and stops', { timeout: 5000 }, async () => {
   const stats = [];
   const paused = [];
   const samples = [0, 0.01, 0.02].map(timestamp => ({
@@ -60,5 +60,15 @@ test('real playback pipeline loads one frame, steps both ways, resumes and stops
   player.resume();
   await playback;
   assert.equal(stats.at(-1).timestamp, 0.02);
+  const beforeRestart = stats.length;
+  player.resume();
+  await until(() => stats.length >= beforeRestart + 3);
+  assert.equal(stats[beforeRestart].timestamp, 0);
+  await until(() => paused.at(-1) === true);
+  await player.seek(0.03);
+  assert.equal(stats.at(-1).timestamp, 0.02, 'seeking to the duration selects the last real frame');
+  await player.seek(0);
+  assert.equal(stats.at(-1).timestamp, 0, 'seeking after playback ends still renders a frame');
+  assert.equal(paused.at(-1), true);
   player.stop();
 });

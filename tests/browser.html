@@ -86,6 +86,11 @@ try {
   activePlayer.resume();
   await playback;
   check(playbackStats.at(-1).frameNumber === 4, 'Player controls resume through the final frame');
+  const finalFps = playbackStats.at(-1).fps;
+  await activePlayer.seek(0.4);
+  check(Math.abs(playbackStats.at(-1).timestamp - 0.3) < 0.00001, 'Seeking to the end selects the final real frame');
+  await activePlayer.seek(0);
+  check(playbackStats.at(-1).timestamp === 0, 'Seeking after playback ends renders the requested frame');
   activePlayer.stop(); activePlayer = null;
 
   async function runExport(selectedMasks) {
@@ -119,7 +124,7 @@ try {
   const masked = await runExport(masks);
   check(unmasked.duplicates.length === 0, 'Unmasked export detects both moving regions');
   check(JSON.stringify(masked.duplicates) === '[2,3]', 'Export applies both masks and still detects changes outside them');
-  check(masked.stats.at(-1).fps === playbackStats.at(-1).fps, 'Export and uninterrupted playback agree on masked FPS');
+  check(masked.stats.at(-1).fps === finalFps, 'Export and uninterrupted playback agree on masked FPS');
 
   const container = document.createElement('div');
   document.body.append(container);

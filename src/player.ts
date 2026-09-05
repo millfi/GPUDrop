@@ -217,15 +217,13 @@ export class Player {
     if (this.stopped) return;
     if (!this.paused && !this.ended) return;
     if (this.ended) {
-      this.ended = false;
       this.paused = false;
       this.pauseStarted = 0;
-      this.shiftPlaybackClock();
-      const resumeTime =
-        this.frameRecords[this.historyIndex]?.sampleTimestamp ??
-        this.mediaStartTime;
-      this.runPlayback(resumeTime).catch(console.error);
-      this.resolvePauseWaiters();
+      const current = this.frameRecords[this.historyIndex];
+      const resumeTime = this.historyIndex < this.frameRecords.length - 1
+        ? current?.sampleTimestamp ?? this.mediaStartTime
+        : this.mediaStartTime;
+      void this.queueSeek(resumeTime);
       this.opts.onPausedChange?.(false);
       return;
     }
@@ -244,11 +242,18 @@ export class Player {
     return this.enqueueStep(() => this.stepBackwardImpl());
   }
 
-  seek(timestamp: number) {
-    if (this.stopped || !this.sampleSink) return Promise.resolve();
+  async seek(timestamp: number) {
+    if (this.stopped || !this.sampleSink) return;
 
     const targetTime = this.mediaStartTime + clamp(timestamp, 0, this.duration);
-    return this.queueSeek(targetTime);
+    const generation = ++this.seekGeneration;
+    // Resolve to a real frame, including when the slider is at the media end.
+    const sample = await this.sampleSink.getSample(targetTime);
+    if (!sample) return;
+    const sampleTimestamp = sample.timestamp;
+    sample.close();
+    if (this.stopped || generation !== this.seekGeneration) return;
+    return this.queueSeek(sampleTimestamp);
   }
 
   private queueSeek(
@@ -271,9 +276,18 @@ export class Player {
     this.seekTarget = seekTarget;
     this.resolvePauseWaiters();
     this.resolveDelayWaiters();
-    return new Promise<void>((resolve) => {
+    const pending = new Promise<void>((resolve) => {
       this.pendingSeek = { targetTime, generation, resolve };
     });
+    if (this.ended) {
+      this.ended = false;
+      // Start where a sample is guaranteed so the pending seek is consumed.
+      void this.runPlayback(this.mediaStartTime).catch(error => {
+        console.error(error);
+        this.stop();
+      });
+    }
+    return pending;
   }
 
   private async stepForwardImpl() {
@@ -291,6 +305,7 @@ export class Player {
       return;
     }
 
+    if (this.ended) return;
     this.shiftPlaybackClock();
     this.pauseStarted = performance.now();
     this.stepBudget++;
@@ -391,8 +406,12 @@ export class Player {
   }
 
   private async runPlayback(startTime: number) {
-    await this.playSamplesFrom(startTime);
-    if (this.stopped) return;
+    do {
+      await this.playSamplesFrom(startTime);
+      if (this.stopped) return;
+      startTime = this.mediaStartTime;
+      // A seek can arrive as the final sample iterator is finishing.
+    } while (this.hasSeekTarget());
     this.ended = true;
     this.paused = true;
     this.pauseStarted = performance.now();
