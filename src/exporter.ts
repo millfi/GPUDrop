@@ -146,8 +146,10 @@ interface SparseChunk {
   position: number;
 }
 
+type ExportVideoCodec = Extract<VideoCodec, "av1" | "hevc" | "avc">;
+
 interface CodecCandidate {
-  codec: VideoCodec;
+  codec: ExportVideoCodec;
   codecLabel: string;
   fullCodecString?: string;
 }
@@ -586,16 +588,14 @@ function buildCodecCandidates(width: number, height: number): CodecCandidate[] {
 }
 
 function estimateVideoBitrate(
-  codec: VideoCodec,
+  codec: ExportVideoCodec,
   width: number,
   height: number,
 ) {
-  const codecEfficiencyFactors: Record<VideoCodec, number> = {
+  const codecEfficiencyFactors: Record<ExportVideoCodec, number> = {
     avc: 1,
     hevc: 0.6,
-    vp9: 0.6,
     av1: 0.4,
-    vp8: 1.2,
   };
   const pixels = width * height;
   const referencePixels = 1920 * 1080;
