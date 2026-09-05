@@ -21,3 +21,22 @@ test('paused playback can export the file independently of the seek position', a
   assert.equal(app.exports[0].startTime, undefined);
   assert.equal(app.exports[0].endTime, undefined);
 });
+
+test('export locks all chart settings until it completes', async () => {
+  let complete;
+  const app = createApp({ exporter: {
+    exportOverlayVideo: () => new Promise(resolve => { complete = resolve; }),
+  } });
+  app.find(n => n.props?.type === 'file').props.onChange({ target: { files: [{ name: 'capture.mp4' }] } });
+  app.render();
+  const pending = app.find(n => n.props?.children === 'Export').props.onClick();
+  app.render();
+  const settings = () => app.nodes().filter(n => ['axis-range-slider', 'axis-number'].includes(n.props?.className));
+  assert.equal(settings().length, 12);
+  assert.ok(settings().every(n => n.props.disabled));
+  assert.ok(app.find(n => n.props?.type === 'file').props.disabled);
+  complete({ audioSkippedReason: null });
+  await pending;
+  app.render();
+  assert.ok(settings().every(n => !n.props.disabled));
+});

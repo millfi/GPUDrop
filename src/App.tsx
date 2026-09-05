@@ -351,13 +351,13 @@ export default function App() {
         diffCanvas: diffCanvas.current!,
         threshold,
         frameThreshold,
-        mask,
+        mask: mask ? { ...mask } : null,
         layout: overlayLayoutRef.current.map((element) => ({
           ...element,
           rect: { ...element.rect },
         })),
-        fpsRange: fpsRangeRef.current,
-        ftRange: ftRangeRef.current,
+        fpsRange: { ...fpsRangeRef.current },
+        ftRange: { ...ftRangeRef.current },
         historyMaxPoints: historyRangeRef.current.max,
         signal: abortController.signal,
         onStats: updateStats,
@@ -702,6 +702,12 @@ export default function App() {
           ? `${t("現在値", "Current")}: fps=${stats.fps}  ${t("フレームタイム", "frameTime")}=${(stats.frameTime * 1000).toFixed(2)}ms`
           : `${t("現在値", "Current")}: —`}
       </div>
+      <p>
+        {t(
+          "現在の設定で全編を再解析して書き出します。再生位置は書き出し範囲に影響しません。",
+          "Export reanalyzes the entire video with the current settings, regardless of the playback position.",
+        )}
+      </p>
       {(exporting || exportMessage) && (
         <div className="stats">
           {exporting && exportProgress
@@ -954,6 +960,7 @@ export default function App() {
               limits={FPS_AXIS_LIMITS}
               step={1}
               onChange={setFpsRange}
+              disabled={exporting}
             />
             <AxisRangeControl
               title={t("横軸レンジ", "X-axis range")}
@@ -965,6 +972,7 @@ export default function App() {
               limits={HISTORY_AXIS_LIMITS}
               step={10}
               onChange={setHistoryRange}
+              disabled={exporting}
             />
           </div>
           <div className="chart-panel">
@@ -991,6 +999,7 @@ export default function App() {
               limits={FT_AXIS_LIMITS}
               step={1}
               onChange={setFtRange}
+              disabled={exporting}
             />
             <AxisRangeControl
               title={t("横軸レンジ", "X-axis range")}
@@ -1002,6 +1011,7 @@ export default function App() {
               limits={HISTORY_AXIS_LIMITS}
               step={10}
               onChange={setHistoryRange}
+              disabled={exporting}
             />
           </div>
         </div>
@@ -1104,6 +1114,7 @@ function AxisRangeControl({
   limits,
   step,
   onChange,
+  disabled = false,
 }: {
   title: string;
   description: string;
@@ -1111,6 +1122,7 @@ function AxisRangeControl({
   limits: AxisRange;
   step: number;
   onChange: (range: AxisRange) => void;
+  disabled?: boolean;
 }) {
   const normalized = normalizeAxisRange(value);
   const applyRange = (next: AxisRange) => {
@@ -1126,6 +1138,7 @@ function AxisRangeControl({
       <div className="axis-range-fields">
         <input
           className="axis-range-slider"
+          disabled={disabled}
           type="range"
           min={limits.min}
           max={limits.max}
@@ -1139,6 +1152,7 @@ function AxisRangeControl({
         <div className="axis-range-inputs">
           <input
             className="axis-number"
+            disabled={disabled}
             type="number"
             min={limits.min}
             max={limits.max}
@@ -1151,6 +1165,7 @@ function AxisRangeControl({
           />
           <input
             className="axis-number"
+            disabled={disabled}
             type="number"
             min={limits.min}
             max={limits.max}

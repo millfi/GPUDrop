@@ -81,6 +81,7 @@ function createApp(overrides = {}) {
     if (!node || typeof node !== 'object') return result;
     if (Array.isArray(node)) { node.forEach(n => walk(n, result)); return result; }
     result.push(node);
+    if (typeof node.type === 'function') walk(node.type(node.props), result);
     walk(node.props?.children, result);
     return result;
   }
